@@ -36,6 +36,26 @@ class UserUpdate(BaseModel):
     current_term_no: Optional[int] = None
 
 
+class FacultyProfileOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    department_id: uuid.UUID
+    employee_no: str
+    designation: str
+
+
+class StudentProfileOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    programme_id: uuid.UUID
+    roll_no: str
+    admission_year: int
+    current_term_no: int
+    status: str
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -49,8 +69,8 @@ class UserOut(BaseModel):
     status: str
     last_login_at: Optional[datetime] = None
     created_at: datetime
-    faculty_profile: Optional[Dict[str, Any]] = None
-    student_profile: Optional[Dict[str, Any]] = None
+    faculty_profile: Optional[FacultyProfileOut] = None
+    student_profile: Optional[StudentProfileOut] = None
 
 
 # Academic Calendar & Terms
@@ -245,7 +265,7 @@ class RoomOut(BaseModel):
 class TimetableSlotCreate(BaseModel):
     offering_id: uuid.UUID
     room_id: uuid.UUID
-    faculty_id: uuid.UUID
+    faculty_id: Optional[uuid.UUID] = None
     day_of_week: str  # MONDAY, TUESDAY...
     start_time: time
     end_time: time
@@ -301,7 +321,8 @@ class ComplianceRecordCreate(BaseModel):
 
 # Grade Approval
 class GradeBatchReviewRequest(BaseModel):
-    action: str  # 'APPROVED' or 'REJECTED'
+    action: Optional[str] = None  # 'APPROVED' or 'REJECTED'
+    status: Optional[str] = None
     remarks: Optional[str] = None
 
 

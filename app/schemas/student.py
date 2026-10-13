@@ -7,7 +7,9 @@ from pydantic import BaseModel, ConfigDict
 
 # Enrolment
 class CourseRegisterRequest(BaseModel):
-    offering_ids: List[uuid.UUID]
+    offering_ids: Optional[List[uuid.UUID]] = None
+    course_offering_id: Optional[uuid.UUID] = None
+    course_id: Optional[uuid.UUID] = None
 
 
 # Assignment Submission

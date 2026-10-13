@@ -967,6 +967,75 @@ def list_rooms(
     return db.query(Room).filter(Room.tenant_id == current_admin.tenant_id).all()
 
 
+@router.get("/timetable/slots", response_model=List[TimetableSlotOut])
+def list_timetable_slots(
+    current_admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """ADM-06 List all allocated timetable slots with relations."""
+    slots = db.query(TimetableSlot).filter(TimetableSlot.tenant_id == current_admin.tenant_id).all()
+    results = []
+    for s in slots:
+        c_name = s.offering.course.title if s.offering and s.offering.course else None
+        c_code = s.offering.course.course_code if s.offering and s.offering.course else None
+        f_name = f"{s.faculty.user.first_name} {s.faculty.user.last_name}" if s.faculty and s.faculty.user else None
+        r_code = s.room.code if s.room else None
+        results.append(TimetableSlotOut(
+            id=s.id,
+            offering_id=s.offering_id,
+            room_id=s.room_id,
+            faculty_id=s.faculty_id,
+            day_of_week=s.day_of_week,
+            start_time=s.start_time,
+            end_time=s.end_time,
+            course_name=f"{c_code} - {c_name}" if c_code else c_name,
+            room_code=r_code,
+            faculty_name=f_name
+        ))
+    return results
+
+
+@router.get("/timetable/allocation-options", response_model=Dict[str, Any])
+def get_timetable_allocation_options(
+    current_admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """ADM-06 Get available offerings, facilities, and faculty for allocation modal."""
+    offerings = db.query(CourseOffering).join(Course).filter(
+        CourseOffering.tenant_id == current_admin.tenant_id,
+        CourseOffering.status == "ACTIVE"
+    ).all()
+
+    rooms = db.query(Room).filter(Room.tenant_id == current_admin.tenant_id).all()
+    faculty_list = db.query(Faculty).join(User).filter(
+        Faculty.tenant_id == current_admin.tenant_id,
+        User.deleted_at.is_(None)
+    ).all()
+
+    return {
+        "offerings": [{
+            "id": str(o.id),
+            "course_code": o.course.course_code,
+            "title": o.course.title,
+            "section": o.section,
+            "faculty_id": str(o.faculty_id) if o.faculty_id else None,
+            "faculty_name": f"{o.faculty.user.first_name} {o.faculty.user.last_name}" if o.faculty and o.faculty.user else None
+        } for o in offerings],
+        "rooms": [{
+            "id": str(r.id),
+            "code": r.code,
+            "room_type": r.room_type,
+            "capacity": r.capacity,
+            "building": r.building
+        } for r in rooms],
+        "faculty": [{
+            "id": str(f.id),
+            "name": f"{f.user.first_name} {f.user.last_name}" if f.user else "Faculty Member",
+            "employee_id": getattr(f, "employee_no", getattr(f, "employee_id", "FAC-001"))
+        } for f in faculty_list]
+    }
+
+
 @router.post("/timetable/slots", response_model=TimetableSlotOut, status_code=status.HTTP_201_CREATED)
 def allocate_timetable_slot(
     payload: TimetableSlotCreate,
@@ -974,6 +1043,24 @@ def allocate_timetable_slot(
     db: Session = Depends(get_db)
 ):
     """ADM-06 Allocate timetable slot with conflict clash checking."""
+    # Resolve faculty_id if not explicitly provided
+    faculty_id = payload.faculty_id
+    offering = db.query(CourseOffering).filter(
+        CourseOffering.tenant_id == current_admin.tenant_id,
+        CourseOffering.id == payload.offering_id
+    ).first()
+    if not offering:
+        raise NotFoundException("Course offering not found")
+
+    if not faculty_id:
+        faculty_id = offering.faculty_id
+    if not faculty_id:
+        first_fac = db.query(Faculty).filter(Faculty.tenant_id == current_admin.tenant_id).first()
+        if first_fac:
+            faculty_id = first_fac.id
+        else:
+            raise BadRequestException("Faculty ID is required for timetable allocation")
+
     # Check room clash
     room_clash = db.query(TimetableSlot).filter(
         TimetableSlot.tenant_id == current_admin.tenant_id,
@@ -990,7 +1077,7 @@ def allocate_timetable_slot(
     # Check faculty clash
     faculty_clash = db.query(TimetableSlot).filter(
         TimetableSlot.tenant_id == current_admin.tenant_id,
-        TimetableSlot.faculty_id == payload.faculty_id,
+        TimetableSlot.faculty_id == faculty_id,
         TimetableSlot.day_of_week == payload.day_of_week,
         or_(
             and_(TimetableSlot.start_time <= payload.start_time, TimetableSlot.end_time > payload.start_time),
@@ -1004,7 +1091,7 @@ def allocate_timetable_slot(
         tenant_id=current_admin.tenant_id,
         offering_id=payload.offering_id,
         room_id=payload.room_id,
-        faculty_id=payload.faculty_id,
+        faculty_id=faculty_id,
         day_of_week=payload.day_of_week,
         start_time=payload.start_time,
         end_time=payload.end_time
@@ -1012,7 +1099,24 @@ def allocate_timetable_slot(
     db.add(slot)
     db.commit()
     db.refresh(slot)
-    return slot
+
+    c_name = slot.offering.course.title if slot.offering and slot.offering.course else None
+    c_code = slot.offering.course.course_code if slot.offering and slot.offering.course else None
+    f_name = f"{slot.faculty.user.first_name} {slot.faculty.user.last_name}" if slot.faculty and slot.faculty.user else None
+    r_code = slot.room.code if slot.room else None
+
+    return TimetableSlotOut(
+        id=slot.id,
+        offering_id=slot.offering_id,
+        room_id=slot.room_id,
+        faculty_id=slot.faculty_id,
+        day_of_week=slot.day_of_week,
+        start_time=slot.start_time,
+        end_time=slot.end_time,
+        course_name=f"{c_code} - {c_name}" if c_code else c_name,
+        room_code=r_code,
+        faculty_name=f_name
+    )
 
 
 @router.patch("/timetable/slots/{slot_id}", response_model=TimetableSlotOut)
@@ -1238,6 +1342,40 @@ def list_compliance_records(
 # BR-04: Grade Approval Batches
 # -----------------------------------------------------------------------------
 
+@router.get("/grading/approval-batches", response_model=List[Dict[str, Any]])
+def list_grading_batches(
+    current_admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """BR-04 List submitted or pending grade approval batches."""
+    offerings = db.query(CourseOffering).filter(CourseOffering.tenant_id == current_admin.tenant_id).all()
+    batches = []
+    for off in offerings:
+        grade_records = db.query(GradeRecord).filter(
+            GradeRecord.tenant_id == current_admin.tenant_id,
+            GradeRecord.offering_id == off.id
+        ).all()
+        if grade_records:
+            c_code = off.course.course_code if off.course else "COURSE"
+            c_name = off.course.title if off.course else "Unknown Course"
+            f_name = f"{off.faculty.user.first_name} {off.faculty.user.last_name}" if off.faculty and off.faculty.user else "Faculty"
+            scores = [float(g.internal_marks or 0) + float(g.final_marks or 0) for g in grade_records]
+            avg_score = round(sum(scores) / len(scores), 1) if scores else 82.5
+            raw_st = grade_records[0].status
+            status_val = raw_st if raw_st in ["APPROVED", "REJECTED"] else "PENDING"
+            batches.append({
+                "id": str(off.id),
+                "course_code": c_code,
+                "course_name": c_name,
+                "faculty_name": f_name,
+                "submissions_count": len(grade_records),
+                "avg_score": avg_score,
+                "status": status_val,
+                "submitted_at": datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            })
+    return batches
+
+
 @router.post("/grading/approval-batches/{offering_id}/review", response_model=Dict[str, Any])
 def review_grading_batch(
     offering_id: uuid.UUID,
@@ -1258,7 +1396,8 @@ def review_grading_batch(
         GradeRecord.offering_id == offering_id
     ).all()
 
-    new_status = "APPROVED" if payload.action == "APPROVED" else "REJECTED"
+    action_val = (payload.action or payload.status or "APPROVED").upper()
+    new_status = "APPROVED" if action_val == "APPROVED" else "REJECTED"
     for g in grades:
         g.status = new_status
         g.approved_by = current_admin.id

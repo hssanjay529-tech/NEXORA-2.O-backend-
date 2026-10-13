@@ -60,5 +60,7 @@ def require_roles(allowed_roles: List[str]):
 
 
 get_current_admin = require_roles(["ADMIN"])
+get_current_dean = require_roles(["DEAN"])
+get_admin_or_dean = require_roles(["ADMIN", "DEAN"])
 get_current_faculty = require_roles(["FACULTY"])
 get_current_student = require_roles(["STUDENT"])

@@ -7,10 +7,70 @@ services:
       POSTGRES_USER: nexora_admin
       POSTGRES_PASSWORD: nexora_password
       POSTGRES_DB: nexora
+      TZ: Asia/Kolkata
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexora_admin -d nexora"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: nexora_backend
+    restart: unless-stopped
+    environment:
+      PROJECT_NAME: "NEXORA — College Management Portal"
+      API_V1_STR: "/api/v1"
+      ENVIRONMENT: "development"
+      DEBUG: "True"
+      POSTGRES_HOST: "db"
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: "nexora_admin"
+      POSTGRES_PASSWORD: "nexora_password"
+      POSTGRES_DB: "nexora"
+      DATABASE_URL: "postgresql+psycopg2://nexora_admin:nexora_password@db:5432/nexora"
+      SECRET_KEY: "nexora-insecure-secret-key-change-in-production-2026-secure-jwt"
+      DEFAULT_TENANT_ID: "11111111-1111-1111-1111-111111111111"
+      BACKEND_CORS_ORIGINS: '["http://localhost:3000","http://localhost:8000","http://127.0.0.1:3000","http://127.0.0.1:8000","http://frontend:3000"]'
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+      - ./run.py:/app/run.py
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nexora_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
 volumes:
   pgdata:
