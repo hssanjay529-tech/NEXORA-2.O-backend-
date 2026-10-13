@@ -311,38 +311,80 @@ def logout(
     payload: LogoutRequest,
     request: Request,
     response: Response,
-    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Session Invalidation: Revokes refresh token and clears cookie."""
-    raw_token = payload.refresh_token or request.cookies.get("refresh_token")
-    if raw_token:
-        token_hash = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
-        stored_token = db.query(UserToken).filter(
+    """Robust Session Invalidation: Revokes refresh token, clears auth cookies, destroys server session state, and sends anti-caching headers."""
+    # 1. Attempt to resolve user from Bearer token
+    user = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token_str = auth_header[7:].strip()
+        try:
+            claims = decode_token(token_str)
+            sub = claims.get("sub")
+            if sub:
+                user = db.query(User).filter(User.id == uuid.UUID(sub)).first()
+        except Exception:
+            pass
+
+    # 2. Check refresh token in payload or cookie
+    raw_refresh = payload.refresh_token or request.cookies.get("refresh_token")
+    if raw_refresh:
+        token_hash = hashlib.sha256(raw_refresh.encode('utf-8')).hexdigest()
+        token_records = db.query(UserToken).filter(
             UserToken.token_hash == token_hash,
-            UserToken.user_id == current_user.id
-        ).first()
-        if stored_token:
-            stored_token.revoked_at = datetime.now(timezone.utc)
-    else:
-        # Revoke all active tokens for this user
+            UserToken.revoked_at.is_(None)
+        ).all()
+        for rec in token_records:
+            rec.revoked_at = datetime.now(timezone.utc)
+            if not user:
+                user = db.query(User).filter(User.id == rec.user_id).first()
+
+    # 3. If user identified, revoke all active refresh tokens for maximum security
+    if user:
         db.query(UserToken).filter(
-            UserToken.user_id == current_user.id,
+            UserToken.user_id == user.id,
             UserToken.revoked_at.is_(None)
         ).update({"revoked_at": datetime.now(timezone.utc)})
 
-    audit = AuditLog(
-        tenant_id=current_user.tenant_id,
-        user_id=current_user.id,
-        action="USER_LOGOUT",
-        entity_type="USER",
-        entity_id=current_user.id
-    )
-    db.add(audit)
+        audit = AuditLog(
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            action="USER_LOGOUT",
+            entity_type="USER",
+            entity_id=user.id
+        )
+        db.add(audit)
+
     db.commit()
 
-    response.delete_cookie("refresh_token")
-    return {"success": True, "message": "Logged out successfully"}
+    # 4. Explicitly delete cookies across all scopes
+    is_secure = (settings.ENVIRONMENT == "production") or (request.url.scheme == "https")
+    response.delete_cookie(
+        key="refresh_token",
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=is_secure
+    )
+    response.delete_cookie(
+        key="refresh_token",
+        path=f"{settings.API_V1_STR}/auth",
+        httponly=True,
+        samesite="lax",
+        secure=is_secure
+    )
+
+    # 5. Destroy client cache and storage via Clear-Site-Data header and cache-control
+    response.headers["Clear-Site-Data"] = '"cache", "cookies", "storage"'
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+
+    return {
+        "success": True,
+        "message": "Session invalidated, all tokens revoked, and auth cookies destroyed on server."
+    }
 
 
 @router.get("/me", response_model=UserMeResponse)

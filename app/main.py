@@ -51,6 +51,27 @@ def create_application() -> FastAPI:
     )
 
     # -------------------------------------------------------------------------
+    # Security & Anti-Caching Headers Middleware
+    # -------------------------------------------------------------------------
+    @app.middleware("http")
+    async def security_and_cache_control_middleware(request: Request, call_next):
+        response = await call_next(request)
+        
+        # Enforce strict anti-caching on all API routes so browsers never cache protected responses
+        if request.url.path.startswith(settings.API_V1_STR) or request.url.path.startswith("/auth"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+
+        # Defense-in-depth security headers
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        
+        return response
+
+    # -------------------------------------------------------------------------
     # Exception Handlers
     # -------------------------------------------------------------------------
     @app.exception_handler(AppException)
