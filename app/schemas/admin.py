@@ -225,9 +225,9 @@ class FeeStructureOut(BaseModel):
 
 
 class BatchInvoicingRequest(BaseModel):
-    fee_structure_id: uuid.UUID
-    programme_id: uuid.UUID
-    term_id: uuid.UUID
+    fee_structure_id: Optional[uuid.UUID] = None
+    programme_id: Optional[uuid.UUID] = None
+    term_id: Optional[uuid.UUID] = None
 
 
 class ScholarshipCreate(BaseModel):

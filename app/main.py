@@ -20,6 +20,89 @@ logger = logging.getLogger("nexora")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.PROJECT_NAME} in {settings.ENVIRONMENT} mode...")
+    try:
+        from app.database import engine, Base, SessionLocal
+        import app.models  # register all SQLAlchemy models
+        logger.info("Verifying database schema...")
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database schema verified.")
+
+        # Ensure default tenant and essential demo accounts exist
+        from app.models.platform import Tenant, User
+        from app.core.security import get_password_hash
+        import uuid
+        db = SessionLocal()
+        try:
+            tenant_count = db.query(Tenant).count()
+            if tenant_count == 0:
+                logger.info("Empty database detected. Auto-seeding default tenant and demo accounts...")
+                default_tenant = Tenant(
+                    id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+                    name="Apex Institute of Technology",
+                    slug="apex",
+                    status="ACTIVE",
+                    settings={
+                        "domain": "apex.edu",
+                        "logo_url": "/assets/nexora-logo-mark.png",
+                        "grading_scale": "standard_gpa_4",
+                        "primary_color": "#0ea5e9"
+                    }
+                )
+                db.add(default_tenant)
+                db.flush()
+
+                users_to_seed = [
+                    User(
+                        id=uuid.UUID("11111111-1111-1111-1111-000000000001"),
+                        tenant_id=default_tenant.id,
+                        email="sanjudeepu.153@gmail.com",
+                        first_name="Sanjay",
+                        last_name="H S",
+                        role="STUDENT",
+                        password_hash=get_password_hash("sanju$123"),
+                        status="ACTIVE"
+                    ),
+                    User(
+                        id=uuid.UUID("11111111-1111-1111-1111-000000000002"),
+                        tenant_id=default_tenant.id,
+                        email="admin@apex.edu",
+                        first_name="Dr. Rajesh",
+                        last_name="Sharma",
+                        role="ADMIN",
+                        password_hash=get_password_hash("Password123!"),
+                        status="ACTIVE"
+                    ),
+                    User(
+                        id=uuid.UUID("11111111-1111-1111-1111-000000000003"),
+                        tenant_id=default_tenant.id,
+                        email="prof.priya@apex.edu",
+                        first_name="Dr. Priya",
+                        last_name="Nair",
+                        role="FACULTY",
+                        password_hash=get_password_hash("Password123!"),
+                        status="ACTIVE"
+                    ),
+                    User(
+                        id=uuid.UUID("2acee541-1735-4d62-ad94-602130299b4f"),
+                        tenant_id=default_tenant.id,
+                        email="dean.engineering@apex.edu",
+                        first_name="Dr. Arvind",
+                        last_name="Swaminathan",
+                        role="DEAN",
+                        password_hash=get_password_hash("Password123!"),
+                        status="ACTIVE"
+                    ),
+                ]
+                db.add_all(users_to_seed)
+                db.commit()
+                logger.info("Auto-seeded default tenant and 4 demo accounts successfully.")
+        except Exception as seed_err:
+            db.rollback()
+            logger.warning(f"Auto-seed skipped or deferred: {seed_err}")
+        finally:
+            db.close()
+    except Exception as db_err:
+        logger.warning(f"Database schema auto-check failed: {db_err}")
     yield
     logger.info(f"Shutting down {settings.PROJECT_NAME}...")
 
@@ -40,11 +123,12 @@ def create_application() -> FastAPI:
     )
 
     # -------------------------------------------------------------------------
-    # CORS Middleware
+    # CORS Middleware (supports local dev and remote cloud frontend origins)
     # -------------------------------------------------------------------------
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.BACKEND_CORS_ORIGINS,
+        allow_origin_regex=r"^https?://.*",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

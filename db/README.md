@@ -4,23 +4,30 @@ This directory contains the database schema initialization and realistic dummy s
 
 ---
 
-## 📁 Files
+## 📁 Database Files & Dumps
 
-- [`01_init_schema.sql`](file:///c:/Users/DELL/OneDrive/Desktop/NEXORA/db/01_init_schema.sql) — DDL script creating extensions (`uuid-ossp`, `pgcrypto`, `citext`) and all 57 tables (2 global + 55 tenant-scoped) with composite foreign keys, indexes, and constraints.
-- [`02_seed_data.sql`](file:///c:/Users/DELL/OneDrive/Desktop/NEXORA/db/02_seed_data.sql) — Comprehensive seed script populating realistic academic data, RBAC personas, courses, offerings, attendance, grades, finance, exams, workflows, and communication records.
+1. **[`01_table_creation.sql`](file:///c:/Users/DELL/OneDrive/Desktop/NEXORA/db/01_table_creation.sql)** (Schema DDL)
+   - Contains table creation commands (`CREATE TABLE IF NOT EXISTS`), extensions (`uuid-ossp`, `pgcrypto`, `citext`), primary/foreign key constraints, unique constraints, check constraints, and performance indexes across all 57 tables.
+
+2. **[`02_data_insertion.sql`](file:///c:/Users/DELL/OneDrive/Desktop/NEXORA/db/02_data_insertion.sql)** (Data Records)
+   - Contains pure data insertion commands (`INSERT INTO ... VALUES (...) ON CONFLICT DO NOTHING`) for all 27 populated tables (over 760+ records).
+   - Features primary student **Sanjay H S** (`sanjudeepu.153@gmail.com`), the active 21-student roster without Nikhitha, faculty, admins, attendance, grades, finance, exams, and courses.
+
+3. **[`03_nexora_complete_dump.sql`](file:///c:/Users/DELL/OneDrive/Desktop/NEXORA/db/03_nexora_complete_dump.sql)** (Full Dump: Schema + Data)
+   - Complete single-file SQL dump combining both Part 1 (Table Creation) and Part 2 (Data Insertion).
+   - Can be imported directly into any fresh or existing PostgreSQL 14+ database in a single command.
 
 ---
 
-## 🚀 How to Run / Reset
-
-From your project root in PowerShell:
+## 🚀 How to Import / Restore
 
 ```powershell
-# 1. Apply Schema
-Get-Content db/01_init_schema.sql -Raw | docker exec -i nexora_db psql -U nexora_admin -d nexora
+# Restore Complete Dump (Schema + Data together):
+Get-Content db/03_nexora_complete_dump.sql -Raw | docker exec -i nexora_db psql -U nexora_admin -d nexora
 
-# 2. Seed Dummy Data
-Get-Content db/02_seed_data.sql -Raw | docker exec -i nexora_db psql -U nexora_admin -d nexora
+# Or restore individually:
+Get-Content db/01_table_creation.sql -Raw | docker exec -i nexora_db psql -U nexora_admin -d nexora
+Get-Content db/02_data_insertion.sql -Raw | docker exec -i nexora_db psql -U nexora_admin -d nexora
 ```
 
 ---
@@ -41,7 +48,7 @@ All accounts are pre-configured with the default password: **`Password123!`**
 | **Faculty (HOD)** | Dr. Aris Thorne | `hod.cse@apex.edu` | HOD & Professor, CSE (`FAC-CSE-001`) |
 | **Faculty** | Dr. Priya Nair | `prof.priya@apex.edu` | Associate Professor, CSE (`FAC-CSE-002`) |
 | **Faculty** | Prof. Vikram Malhotra | `prof.vikram@apex.edu` | Assistant Professor, ECE (`FAC-ECE-001`) |
-| **Student** | Aarav Patel | `student.aarav@apex.edu` | B.Tech CSE, Term 5 (`2024CSE001`) |
-| **Student** | Ananya Iyer | `student.ananya@apex.edu` | B.Tech CSE, Term 5 (`2024CSE002`) |
-| **Student** | Rohan Gupta | `student.rohan@apex.edu` | B.Tech CSE, Term 5 (`2024CSE003`) |
-| **Student** | Sneha Verma | `student.sneha@apex.edu` | B.Tech ECE, Term 5 (`2024ECE001`) |
+| **Student** | Sanjay H S | `sanjudeepu.153@gmail.com` | B.Tech CSE, Term 5 (`2024CSE001`, Password: `sanju$123`) |
+| **Student** | Nirmala G | `student.nirmala.g@apex.edu` | B.Tech CSE, Term 5 (`2024CSE003`) |
+| **Student** | Nisarga B G | `student.nisarga.bg@apex.edu` | B.Tech ECE, Term 5 (`2024ECE001`) |
+| **Student** | Nishanth C K | `student.nishanth.ck@apex.edu` | B.Tech CSE, Term 5 (`2024CSE004`) |

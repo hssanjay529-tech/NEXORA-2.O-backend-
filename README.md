@@ -23,7 +23,7 @@ All credentials below are active and verified in the database:
 
 | Role | Name | Institutional Email | Password | Identifier | Default Workspace |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **STUDENT** | Aarav Reddy | `student.aarav.reddy1@apex.edu` | `Password123!` | `2024CSE001` | Student Portal (Overview, Courses, Attendance, Invoices, Exams) |
+| **STUDENT** | Sanjay H S | `sanjudeepu.153@gmail.com` | `sanju$123` | `2024CSE001` | Student Portal (Overview, Courses, Attendance, Invoices, Exams) |
 | **FACULTY** | Dr. Priya Nair | `prof.priya@apex.edu` | `Password123!` | `FAC-CSE-002` | Faculty Portal (Attendance Matrix, Course Vault, Gradebook) |
 | **DEAN** | Dr. Arvind Swaminathan | `dean.engineering@apex.edu` | `Password123!` | `DEAN-ENG-001` | Dean Executive Suite (School Metrics, Curriculum Approvals, KPIs) |
 | **ADMIN** | Dr. Rajesh Sharma | `admin@apex.edu` | `Password123!` | `ADM-001` | Governance & Control (Directory, Schedule Matrix, Invoicing, Audits) |

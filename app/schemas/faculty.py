@@ -41,7 +41,7 @@ class AttendanceRecordItem(BaseModel):
 
 
 class AttendanceBatchRecordRequest(BaseModel):
-    offering_id: uuid.UUID
+    offering_id: Optional[uuid.UUID] = None
     att_date: date
     records: List[AttendanceRecordItem]
 
@@ -56,6 +56,7 @@ class AssignmentCreate(BaseModel):
     rubric_file_id: Optional[uuid.UUID] = None
 
 
+# Quiz Models
 class QuizQuestionItem(BaseModel):
     question_text: str
     options: List[str]
@@ -92,7 +93,8 @@ class GradeBatchEntryRequest(BaseModel):
 
 
 class SubmitGradeApprovalRequest(BaseModel):
-    offering_id: uuid.UUID
+    offering_id: Optional[uuid.UUID] = None
+    course_code: Optional[str] = None
     remarks: Optional[str] = None
 
 

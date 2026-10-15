@@ -16,13 +16,15 @@ class CourseRegisterRequest(BaseModel):
 class AssignmentSubmitRequest(BaseModel):
     file_id: Optional[uuid.UUID] = None
     answers: Optional[Dict[str, Any]] = None
+    notes: Optional[str] = None
 
 
 # Fee Payments
 class FeePaymentRequest(BaseModel):
     fee_record_id: uuid.UUID
     amount: Decimal
-    method: str = "CARD"  # CARD, UPI, NET_BANKING, etc.
+    method: Optional[str] = "CARD"  # CARD, UPI, NET_BANKING, etc.
+    payment_method: Optional[str] = None
     gateway_ref: Optional[str] = None
 
 
@@ -34,7 +36,8 @@ class ExamRegisterRequest(BaseModel):
 # Grievances
 class GrievanceCreate(BaseModel):
     category: str  # ACADEMIC, FINANCE, FACILITY, EXAMINATION, HARASSMENT, OTHER
-    title: str
+    title: Optional[str] = None
+    subject: Optional[str] = None
     description: str
     priority: Optional[str] = "MEDIUM"
 

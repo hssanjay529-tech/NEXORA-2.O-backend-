@@ -347,9 +347,13 @@ def submit_assignment(
     is_late = now > assign.due_at
     sub_status = "LATE" if is_late else "SUBMITTED"
 
+    submission_answers = payload.answers or {}
+    if payload.notes and "notes" not in submission_answers:
+        submission_answers["notes"] = payload.notes
+
     if sub:
         sub.file_id = payload.file_id
-        sub.answers = payload.answers or {}
+        sub.answers = submission_answers
         sub.submitted_at = now
         sub.status = sub_status
     else:
@@ -358,7 +362,7 @@ def submit_assignment(
             assignment_id=assignment_id,
             student_id=stu.id,
             file_id=payload.file_id,
-            answers=payload.answers or {},
+            answers=submission_answers,
             submitted_at=now,
             status=sub_status
         )
@@ -467,11 +471,12 @@ def pay_fee(
         raise NotFoundException("Fee record not found")
 
     gateway_ref = payload.gateway_ref or f"PAY_{uuid.uuid4().hex[:12].upper()}"
+    selected_method = payload.method or payload.payment_method or "CARD"
     payment = Payment(
         tenant_id=current_user.tenant_id,
         fee_record_id=payload.fee_record_id,
         amount=payload.amount,
-        method=payload.method,
+        method=selected_method,
         gateway_ref=gateway_ref,
         status="VERIFIED",  # Simulate payment gateway verification
         verified_at=datetime.now(timezone.utc)
@@ -796,11 +801,12 @@ def raise_grievance(
 ):
     """STU-08 File grievance ticket."""
     stu = _get_student_profile(current_user, db)
+    resolved_title = payload.title or payload.subject or "Student Inquiry"
     ticket = GrievanceTicket(
         tenant_id=current_user.tenant_id,
         student_id=stu.id,
         category=payload.category,
-        title=payload.title,
+        title=resolved_title,
         description=payload.description,
         priority=payload.priority or "MEDIUM",
         status="OPEN"

@@ -498,23 +498,43 @@ class Notification(Base):
 # =============================================================================
 
 # Standard Bcrypt hash for: Password123!
-PASSWORD_HASH = "$2a$10$wN9P3XJv8mQv8W3hP5nqeOH5/w.wXhWjJ.88G4yGg5d9u1L7vB2Gy"
+PASSWORD_HASH = "$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O"
 
-FIRST_NAMES = [
-    "Aarav", "Ananya", "Rohan", "Sneha", "Aditya", "Ishaan", "Pooja", "Vikram",
-    "Divya", "Siddharth", "Neha", "Rahul", "Kavya", "Varun", "Priya", "Arjun",
-    "Tanvi", "Manish", "Meera", "Karan", "Riya", "Gaurav", "Simran", "Nikhil",
-    "Shreya", "Akash", "Anika", "Suresh", "Bhavna", "Deepak", "Swati", "Harsh",
-    "Kritika", "Raj", "Tara", "Kunal", "Preeti", "Alok", "Lavanya", "Vivek",
-    "Nisha", "Mohit", "Smriti", "Yash", "Ritu", "Sameer", "Geeta", "Tushar",
-    "Sakshi", "Pranav"
-]
+# Verified Bcrypt hash for: sanju$123
+SANJU_PASSWORD_HASH = "$2b$12$o45LmGhmxajUmZsulz8yW.S27DPhagMujyi.9MIPMAClzo2Tjjjbm"
 
-LAST_NAMES = [
-    "Sharma", "Patel", "Verma", "Iyer", "Gupta", "Malhotra", "Nair", "Reddy",
-    "Deshmukh", "Mukherjee", "Joshi", "Bose", "Menon", "Chopra", "Kulkarni",
-    "Bhat", "Rao", "Kapoor", "Mishra", "Saxena", "Sen", "Nambiar", "Thakur",
-    "Agarwal", "Pillai", "Choudhury", "Bhattacharya", "Dubey", "Mehta", "Singh"
+# Primary Student Account Configuration
+PRIMARY_STUDENT = {
+    "first_name": "Sanjay",
+    "last_name": "H S",
+    "email": "sanjudeepu.153@gmail.com",
+    "password": "sanju$123",
+    "password_hash": SANJU_PASSWORD_HASH,
+}
+
+# Replacement Student Roster (eliminating dummy names)
+STUDENT_ROSTER = [
+    ("Nirmala", "G"),
+    ("Nisarga", "B G"),
+    ("Nishanth", "C K"),
+    ("Pavanraj", "Shetty S R"),
+    ("Pooja", ""),
+    ("Prajwal", "Gowda D"),
+    ("Prarthana", "Ria R"),
+    ("Preetham", "H A"),
+    ("Prekshith", "M K"),
+    ("Sahana", ""),
+    ("Sanika", "C B"),
+    ("Shalini", "M R"),
+    ("Shashank", "H M"),
+    ("Shreyas", "K M"),
+    ("Shreyas", "V A"),
+    ("Shwetha", "C S"),
+    ("Soujanya", "H M"),
+    ("Srujana", "K A"),
+    ("Suprith", "T M"),
+    ("Tarun", "Gowda A L"),
+    ("Tejal", "Shekar"),
 ]
 
 
@@ -942,9 +962,18 @@ def seed_database(db_url: str, reset: bool = True):
         students = []
         enrollments = []
         for idx, cfg in enumerate(student_configs):
-            first_name = FIRST_NAMES[idx % len(FIRST_NAMES)]
-            last_name = LAST_NAMES[(idx * 3 + 7) % len(LAST_NAMES)]
-            email = f"student.{first_name.lower()}.{last_name.lower()}{idx+1}@{cfg['domain']}"
+            if idx == 0:
+                first_name = PRIMARY_STUDENT["first_name"]
+                last_name = PRIMARY_STUDENT["last_name"]
+                email = PRIMARY_STUDENT["email"]
+                pwd_hash = PRIMARY_STUDENT["password_hash"]
+            else:
+                r_idx = (idx - 1) % len(STUDENT_ROSTER)
+                first_name, last_name = STUDENT_ROSTER[r_idx]
+                clean_name = f"{first_name.lower()}.{last_name.replace(' ', '').lower()}" if last_name else first_name.lower()
+                email = f"student.{clean_name}{idx+1}@{cfg['domain']}"
+                pwd_hash = PASSWORD_HASH
+
             user_uuid = uuid.UUID(f"eeeeeeee-0000-0000-0000-{idx+1:012d}")
             student_uuid = uuid.UUID(f"eeeeeeee-1111-0000-0000-{idx+1:012d}")
 
@@ -955,7 +984,7 @@ def seed_database(db_url: str, reset: bool = True):
                 email=email,
                 first_name=first_name,
                 last_name=last_name,
-                password_hash=PASSWORD_HASH,
+                password_hash=pwd_hash,
                 status='ACTIVE'
             )
             session.add(s_user)
@@ -1346,14 +1375,12 @@ def seed_database(db_url: str, reset: bool = True):
         print(f"  * Attendance Logs          : {total_attendance}")
         print("="*70)
         print("  [*] Standard Test Account Credentials:")
-        print("     Default Password: Password123!")
-        print("     - Platform Superadmin : superadmin@nexoracloud.com")
-        print("     - Apex Admin          : admin@apex.edu")
-        print("     - Metro Admin         : admin@metro.edu")
-        print("     - Apex CSE HOD        : hod.cse@apex.edu")
-        print("     - Metro CSE HOD       : hod.cse@metro.edu")
-        print("     - Sample Student Apex : student.aarav.sharma1@apex.edu")
-        print("     - Sample Student Metro: student.aarav.sharma26@metro.edu")
+        print("     - Student (Sanjay H S) : sanjudeepu.153@gmail.com (Password: sanju$123)")
+        print("     - Platform Superadmin  : superadmin@nexoracloud.com (Password: Password123!)")
+        print("     - Apex Admin           : admin@apex.edu (Password: Password123!)")
+        print("     - Metro Admin          : admin@metro.edu (Password: Password123!)")
+        print("     - Apex CSE HOD         : hod.cse@apex.edu (Password: Password123!)")
+        print("     - Metro CSE HOD        : hod.cse@metro.edu (Password: Password123!)")
         print("="*70 + "\n")
 
     except Exception as e:

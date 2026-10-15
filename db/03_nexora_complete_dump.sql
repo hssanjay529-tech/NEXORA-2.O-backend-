@@ -1,0 +1,1957 @@
+-- ================================================================================
+-- NEXORA Multi-Tenant Architecture — Complete Database Dump (Schema + Data)
+-- Dump Generated At: 2026-10-14 19:54:45 UTC
+-- Target Database: PostgreSQL 16 (Compatible with PostgreSQL 14+)
+-- Total Schema Tables: 57 | Total Populated Tables: 27 | Total Records: 760+
+-- Primary Student: Sanjay H S (sanjudeepu.153@gmail.com)
+-- ================================================================================
+
+-- ================================================================================
+-- PART 1: DDL TABLE CREATION & SCHEMA DEFINITION (57 Tables)
+-- ================================================================================
+-- ================================================================================
+-- NEXORA Multi-Tenant Database Architecture — Schema Initialization (PostgreSQL 16)
+-- Conforms to database_architecture.md (57 tables: 2 global, 55 tenant-scoped)
+-- ================================================================================
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "citext";
+
+-- ================================================================================
+-- 1. GLOBAL TABLES (No RLS)
+-- ================================================================================
+
+CREATE TABLE IF NOT EXISTS tenants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED', 'ARCHIVED')),
+    settings JSONB NOT NULL DEFAULT '{
+        "currency": "INR",
+        "timezone": "Asia/Kolkata",
+        "branding": {"logo_url": null, "primary_color": "#1e40af"},
+        "thresholds": {"min_attendance_pct": 75.0, "passing_grade_pct": 40.0}
+    }'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE IF NOT EXISTS platform_operators (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email CITEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED')),
+    last_login_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+-- ================================================================================
+-- 2. TENANCY, IDENTITY & PLATFORM (Tenant-Scoped)
+-- ================================================================================
+
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('ADMIN', 'FACULTY', 'STUDENT')),
+    email CITEXT NOT NULL,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
+    avatar_url TEXT,
+    password_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'ARCHIVED')),
+    last_login_at TIMESTAMPTZ,
+    failed_login_count INT NOT NULL DEFAULT 0,
+    locked_until TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_users_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_users_tenant_email UNIQUE (tenant_id, email)
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_tenant_role_status ON users(tenant_id, role, status);
+
+CREATE TABLE IF NOT EXISTS files (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    uploaded_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    storage_key TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    sha256 TEXT,
+    kind TEXT CHECK (kind IN ('SYLLABUS', 'RUBRIC', 'SUBMISSION', 'RECEIPT', 'HALL_TICKET', 'DOCUMENT', 'COMPLIANCE', 'REPORT', 'AVATAR', 'MATERIAL', 'ATTACHMENT', 'OTHER')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_files_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_files_tenant_storage_key UNIQUE (tenant_id, storage_key),
+    CONSTRAINT ck_files_storage_key_tenant CHECK (storage_key LIKE tenant_id || '/%')
+);
+
+CREATE TABLE IF NOT EXISTS user_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    purpose TEXT NOT NULL CHECK (purpose IN ('REFRESH', 'PASSWORD_RESET', 'ACTIVATION')),
+    token_hash TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_user_tokens_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_user_tokens_tenant_hash UNIQUE (tenant_id, token_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_tokens_tenant_user_purpose ON user_tokens(tenant_id, user_id, purpose);
+
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    email CITEXT NOT NULL,
+    success BOOLEAN NOT NULL,
+    ip_address TEXT,
+    attempted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_login_attempts_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_login_attempts_tenant_email_time ON login_attempts(tenant_id, email, attempted_at);
+
+CREATE TABLE IF NOT EXISTS departments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    code TEXT NOT NULL,
+    head_faculty_id UUID, -- Foreign key to faculty(id) added after faculty table creation
+    budget NUMERIC(12,2) DEFAULT 0.00,
+    established_on DATE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_departments_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_departments_tenant_name UNIQUE (tenant_id, name),
+    CONSTRAINT uq_departments_tenant_code UNIQUE (tenant_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS faculty (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    department_id UUID NOT NULL REFERENCES departments(id) ON DELETE RESTRICT,
+    employee_no TEXT NOT NULL,
+    designation TEXT NOT NULL,
+    deleted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_faculty_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_faculty_tenant_user UNIQUE (tenant_id, user_id),
+    CONSTRAINT uq_faculty_tenant_empno UNIQUE (tenant_id, employee_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_faculty_tenant_dept ON faculty(tenant_id, department_id);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints 
+        WHERE constraint_name = 'fk_departments_head_faculty'
+    ) THEN
+        ALTER TABLE departments 
+        ADD CONSTRAINT fk_departments_head_faculty 
+        FOREIGN KEY (head_faculty_id) REFERENCES faculty(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS programmes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    department_id UUID NOT NULL REFERENCES departments(id) ON DELETE RESTRICT,
+    name TEXT NOT NULL,
+    code TEXT NOT NULL,
+    duration_terms INT NOT NULL DEFAULT 8,
+    degree_level TEXT NOT NULL CHECK (degree_level IN ('UNDERGRADUATE', 'POSTGRADUATE', 'DIPLOMA', 'DOCTORAL')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_programmes_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_programmes_tenant_name UNIQUE (tenant_id, name),
+    CONSTRAINT uq_programmes_tenant_code UNIQUE (tenant_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS students (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    programme_id UUID NOT NULL REFERENCES programmes(id) ON DELETE RESTRICT,
+    roll_no TEXT NOT NULL,
+    admission_year INT NOT NULL,
+    current_term_no INT NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED', 'ALUMNI', 'DROPPED')),
+    deleted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_students_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_students_tenant_user UNIQUE (tenant_id, user_id),
+    CONSTRAINT uq_students_tenant_rollno UNIQUE (tenant_id, roll_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_students_tenant_programme ON students(tenant_id, programme_id);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    action TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id UUID NOT NULL,
+    old_value JSONB,
+    new_value JSONB,
+    ip_address TEXT,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_audit_logs_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_entity ON audit_logs(tenant_id, entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_user_time ON audit_logs(tenant_id, user_id, occurred_at);
+
+CREATE TABLE IF NOT EXISTS background_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    job_type TEXT NOT NULL CHECK (job_type IN ('REPORT', 'DOCUMENT', 'NOTIFY', 'SYSTEM_SYNC')),
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'COMPLETED' CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'RETRYING')),
+    run_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    attempts INT NOT NULL DEFAULT 0,
+    locked_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_background_jobs_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_background_jobs_tenant_status_run ON background_jobs(tenant_id, status, run_at);
+
+-- ================================================================================
+-- 3. ACADEMIC STRUCTURE & SCHEDULING
+-- ================================================================================
+
+CREATE TABLE IF NOT EXISTS academic_years (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL CHECK (end_date > start_date),
+    status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'PUBLISHED', 'ARCHIVED')),
+    published_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    published_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_academic_years_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_academic_years_tenant_label UNIQUE (tenant_id, label)
+);
+
+CREATE TABLE IF NOT EXISTS terms (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    academic_year_id UUID NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    term_no INT NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL CHECK (end_date > start_date),
+    enrolment_opens_at TIMESTAMPTZ,
+    enrolment_closes_at TIMESTAMPTZ,
+    is_current BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_terms_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_terms_tenant_ay_term UNIQUE (tenant_id, academic_year_id, term_no)
+);
+
+CREATE TABLE IF NOT EXISTS calendar_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    academic_year_id UUID NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+    term_id UUID REFERENCES terms(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK (event_type IN ('HOLIDAY', 'EXAM_WINDOW', 'EVENT', 'ACADEMIC_DEADLINE')),
+    title TEXT NOT NULL,
+    description TEXT,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL CHECK (end_date >= start_date),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_calendar_events_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_calendar_events_tenant_ay_type ON calendar_events(tenant_id, academic_year_id, event_type);
+
+CREATE TABLE IF NOT EXISTS courses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    department_id UUID NOT NULL REFERENCES departments(id) ON DELETE RESTRICT,
+    course_code TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    credits INT NOT NULL DEFAULT 3,
+    syllabus_file_id UUID REFERENCES files(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'ARCHIVED')),
+    deleted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_courses_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_courses_tenant_code UNIQUE (tenant_id, course_code)
+);
+
+CREATE TABLE IF NOT EXISTS programme_courses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    programme_id UUID NOT NULL REFERENCES programmes(id) ON DELETE CASCADE,
+    course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    term_no INT NOT NULL,
+    is_mandatory BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_programme_courses_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_programme_courses_tenant_prog_course UNIQUE (tenant_id, programme_id, course_id)
+);
+
+CREATE TABLE IF NOT EXISTS course_offerings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    term_id UUID NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+    faculty_id UUID NOT NULL REFERENCES faculty(id) ON DELETE RESTRICT,
+    section TEXT NOT NULL DEFAULT 'A',
+    capacity INT NOT NULL DEFAULT 60,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'CANCELLED', 'COMPLETED')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_course_offerings_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_course_offerings_tenant_course_term_sec UNIQUE (tenant_id, course_id, term_id, section)
+);
+
+CREATE INDEX IF NOT EXISTS idx_course_offerings_tenant_fac_term ON course_offerings(tenant_id, faculty_id, term_id);
+
+CREATE TABLE IF NOT EXISTS enrollments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    offering_id UUID NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'ENROLLED' CHECK (status IN ('ENROLLED', 'DROPPED', 'COMPLETED')),
+    enrolled_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_enrollments_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_enrollments_tenant_offering_student UNIQUE (tenant_id, offering_id, student_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_enrollments_tenant_student ON enrollments(tenant_id, student_id);
+
+CREATE TABLE IF NOT EXISTS course_materials (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    offering_id UUID NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+    file_id UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT,
+    uploaded_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_course_materials_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_course_materials_tenant_offering ON course_materials(tenant_id, offering_id);
+
+CREATE TABLE IF NOT EXISTS rooms (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    code TEXT NOT NULL,
+    room_type TEXT NOT NULL CHECK (room_type IN ('CLASSROOM', 'LAB', 'SEMINAR_HALL', 'AUDITORIUM')),
+    capacity INT NOT NULL DEFAULT 60,
+    building TEXT NOT NULL,
+    floor INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_rooms_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_rooms_tenant_code UNIQUE (tenant_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS timetable_slots (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    offering_id UUID NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+    room_id UUID NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
+    faculty_id UUID NOT NULL REFERENCES faculty(id) ON DELETE RESTRICT,
+    day_of_week TEXT NOT NULL CHECK (day_of_week IN ('MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY')),
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL CHECK (end_time > start_time),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_timetable_slots_tenant_id UNIQUE (tenant_id, id)
+);
+
+-- ================================================================================
+-- 4. ASSESSMENT & RESULTS
+-- ================================================================================
+
+CREATE TABLE IF NOT EXISTS attendance (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    offering_id UUID NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    att_date DATE NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('PRESENT', 'ABSENT', 'LATE', 'EXCUSED')),
+    marked_by UUID REFERENCES faculty(id) ON DELETE SET NULL,
+    remarks TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_attendance_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_attendance_tenant_offering_student_date UNIQUE (tenant_id, offering_id, student_id, att_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_attendance_tenant_student_date ON attendance(tenant_id, student_id, att_date);
+
+CREATE TABLE IF NOT EXISTS assignments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    offering_id UUID NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('ASSIGNMENT', 'QUIZ')),
+    title TEXT NOT NULL,
+    description TEXT,
+    due_at TIMESTAMPTZ NOT NULL,
+    max_marks NUMERIC(5,2) NOT NULL DEFAULT 100.00,
+    rubric_file_id UUID REFERENCES files(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'PUBLISHED' CHECK (status IN ('DRAFT', 'PUBLISHED', 'CLOSED', 'GRADED')),
+    created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_assignments_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_assignments_tenant_offering_due ON assignments(tenant_id, offering_id, due_at);
+
+CREATE TABLE IF NOT EXISTS quiz_questions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    assignment_id UUID NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    question_text TEXT NOT NULL,
+    options JSONB NOT NULL DEFAULT '[]'::jsonb,
+    correct_answer TEXT NOT NULL,
+    marks NUMERIC(5,2) NOT NULL DEFAULT 1.00,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_quiz_questions_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS assignment_submissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    assignment_id UUID NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    file_id UUID REFERENCES files(id) ON DELETE SET NULL,
+    answers JSONB DEFAULT '{}'::jsonb,
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    marks NUMERIC(5,2),
+    feedback TEXT,
+    graded_by UUID REFERENCES faculty(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'SUBMITTED' CHECK (status IN ('SUBMITTED', 'GRADED', 'LATE', 'RESUBMISSION_REQUESTED')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_assignment_submissions_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_assignment_submissions_tenant_assign_student UNIQUE (tenant_id, assignment_id, student_id)
+);
+
+CREATE TABLE IF NOT EXISTS grading_scales (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    grade TEXT NOT NULL,
+    min_marks NUMERIC(5,2) NOT NULL,
+    max_marks NUMERIC(5,2) NOT NULL,
+    grade_points NUMERIC(4,2) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_grading_scales_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_grading_scales_tenant_grade UNIQUE (tenant_id, grade)
+);
+
+CREATE TABLE IF NOT EXISTS grade_records (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    offering_id UUID NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+    internal_marks NUMERIC(5,2) DEFAULT 0.00,
+    final_marks NUMERIC(5,2) DEFAULT 0.00,
+    total_marks NUMERIC(5,2) GENERATED ALWAYS AS (internal_marks + final_marks) STORED,
+    grade TEXT,
+    grade_points NUMERIC(4,2),
+    status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'COMPLETED')),
+    submitted_by UUID REFERENCES faculty(id) ON DELETE SET NULL,
+    approved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    published_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_grade_records_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_grade_records_tenant_student_offering UNIQUE (tenant_id, student_id, offering_id)
+);
+
+CREATE TABLE IF NOT EXISTS student_term_results (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    term_id UUID NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+    sgpa NUMERIC(4,2) NOT NULL,
+    cgpa NUMERIC(4,2) NOT NULL,
+    credits_earned INT NOT NULL DEFAULT 0,
+    published_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_student_term_results_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_student_term_results_tenant_student_term UNIQUE (tenant_id, student_id, term_id)
+);
+
+CREATE TABLE IF NOT EXISTS academic_flags (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    offering_id UUID REFERENCES course_offerings(id) ON DELETE SET NULL,
+    flag_type TEXT NOT NULL CHECK (flag_type IN ('ATTENDANCE', 'ACADEMIC', 'PLAGIARISM', 'MISCONDUCT', 'WELFARE', 'PERFORMANCE')),
+    raised_by UUID NOT NULL REFERENCES faculty(id) ON DELETE RESTRICT,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'IN_PROGRESS', 'RESOLVED', 'DISMISSED')),
+    assigned_to UUID REFERENCES users(id) ON DELETE SET NULL,
+    resolved_at TIMESTAMPTZ,
+    resolution_notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_academic_flags_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_academic_flags_tenant_student_status ON academic_flags(tenant_id, student_id, status);
+
+-- ================================================================================
+-- 5. FINANCE, EXAMINATIONS & DOCUMENTS
+-- ================================================================================
+
+CREATE TABLE IF NOT EXISTS fee_structures (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    programme_id UUID NOT NULL REFERENCES programmes(id) ON DELETE CASCADE,
+    term_id UUID NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    amount NUMERIC(12,2) NOT NULL,
+    due_date DATE NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_fee_structures_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fee_structures_tenant_prog_term ON fee_structures(tenant_id, programme_id, term_id);
+
+CREATE TABLE IF NOT EXISTS scholarships (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('PERCENT', 'FIXED')),
+    value NUMERIC(12,2) NOT NULL,
+    criteria TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_scholarships_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_scholarships_tenant_name UNIQUE (tenant_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS student_scholarships (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    scholarship_id UUID NOT NULL REFERENCES scholarships(id) ON DELETE CASCADE,
+    term_id UUID NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+    awarded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_student_scholarships_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_student_scholarships_tenant_combo UNIQUE (tenant_id, student_id, scholarship_id, term_id)
+);
+
+CREATE TABLE IF NOT EXISTS fee_records (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    fee_structure_id UUID NOT NULL REFERENCES fee_structures(id) ON DELETE CASCADE,
+    amount_due NUMERIC(12,2) NOT NULL,
+    discount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    due_date DATE NOT NULL,
+    paid_date DATE,
+    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PAID', 'OVERDUE', 'PARTIAL', 'CANCELLED')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_fee_records_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fee_records_tenant_student_status ON fee_records(tenant_id, student_id, status);
+
+CREATE TABLE IF NOT EXISTS payments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    fee_record_id UUID NOT NULL REFERENCES fee_records(id) ON DELETE CASCADE,
+    amount NUMERIC(12,2) NOT NULL,
+    method TEXT NOT NULL CHECK (method IN ('CARD', 'UPI', 'NET_BANKING', 'CASH', 'CHEQUE', 'BANK_TRANSFER')),
+    gateway_ref TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'INITIATED' CHECK (status IN ('INITIATED', 'VERIFIED', 'FAILED', 'REFUNDED')),
+    verified_at TIMESTAMPTZ,
+    receipt_file_id UUID REFERENCES files(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_payments_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_payments_tenant_gateway_ref UNIQUE (tenant_id, gateway_ref)
+);
+
+CREATE TABLE IF NOT EXISTS exams (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    term_id UUID NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+    offering_id UUID NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+    exam_type TEXT NOT NULL CHECK (exam_type IN ('MID_TERM', 'FINAL', 'LAB', 'RE_EXAM')),
+    exam_date DATE NOT NULL,
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL CHECK (end_time > start_time),
+    room_id UUID REFERENCES rooms(id) ON DELETE SET NULL,
+    max_marks NUMERIC(5,2) NOT NULL DEFAULT 100.00,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_exams_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exams_tenant_term_date ON exams(tenant_id, term_id, exam_date);
+
+CREATE TABLE IF NOT EXISTS exam_eligibility_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    term_id UUID NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+    min_attendance_pct NUMERIC(5,2) NOT NULL DEFAULT 75.00,
+    require_fees_cleared BOOLEAN NOT NULL DEFAULT true,
+    extra_rules JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_exam_eligibility_rules_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_exam_eligibility_rules_tenant_term UNIQUE (tenant_id, term_id)
+);
+
+CREATE TABLE IF NOT EXISTS exam_registrations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    exam_id UUID NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    is_eligible BOOLEAN NOT NULL DEFAULT true,
+    status TEXT NOT NULL DEFAULT 'REGISTERED' CHECK (status IN ('REGISTERED', 'APPROVED', 'BLOCKED', 'CANCELLED')),
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_exam_registrations_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_exam_registrations_tenant_exam_student UNIQUE (tenant_id, exam_id, student_id)
+);
+
+CREATE TABLE IF NOT EXISTS hall_tickets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    registration_id UUID NOT NULL REFERENCES exam_registrations(id) ON DELETE CASCADE,
+    file_id UUID REFERENCES files(id) ON DELETE SET NULL,
+    ticket_no TEXT NOT NULL,
+    issued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_hall_tickets_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_hall_tickets_tenant_reg UNIQUE (tenant_id, registration_id),
+    CONSTRAINT uq_hall_tickets_tenant_ticket_no UNIQUE (tenant_id, ticket_no)
+);
+
+CREATE TABLE IF NOT EXISTS document_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    doc_type TEXT NOT NULL CHECK (doc_type IN ('BONAFIDE', 'TRANSCRIPT', 'GRADE_CARD', 'TRANSFER_CERTIFICATE', 'COURSE_COMPLETION', 'OTHER')),
+    status TEXT NOT NULL DEFAULT 'SUBMITTED' CHECK (status IN ('DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'COMPLETED')),
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    approved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    file_id UUID REFERENCES files(id) ON DELETE SET NULL,
+    verification_code TEXT NOT NULL,
+    remarks TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_document_requests_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_document_requests_tenant_verif_code UNIQUE (tenant_id, verification_code)
+);
+
+-- ================================================================================
+-- 6. WORKFLOW & REQUESTS
+-- ================================================================================
+
+CREATE TABLE IF NOT EXISTS workflow_instances (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    entity_type TEXT NOT NULL,
+    entity_id UUID NOT NULL,
+    submitted_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'SUBMITTED' CHECK (status IN ('DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'COMPLETED')),
+    current_step TEXT NOT NULL DEFAULT 'HOD_APPROVAL',
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_workflow_instances_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_workflow_instances_tenant_entity UNIQUE (tenant_id, entity_type, entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_instances_tenant_status ON workflow_instances(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS workflow_transitions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    instance_id UUID NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
+    from_status TEXT NOT NULL,
+    to_status TEXT NOT NULL,
+    actor_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    remarks TEXT,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_workflow_transitions_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS course_proposals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    faculty_id UUID NOT NULL REFERENCES faculty(id) ON DELETE CASCADE,
+    department_id UUID NOT NULL REFERENCES departments(id) ON DELETE RESTRICT,
+    course_title TEXT NOT NULL,
+    course_code TEXT NOT NULL,
+    credits INT NOT NULL DEFAULT 3,
+    description TEXT,
+    syllabus_file_id UUID REFERENCES files(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'SUBMITTED' CHECK (status IN ('DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'COMPLETED')),
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    reviewed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at TIMESTAMPTZ,
+    remarks TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_course_proposals_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS leave_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    faculty_id UUID NOT NULL REFERENCES faculty(id) ON DELETE CASCADE,
+    leave_type TEXT NOT NULL CHECK (leave_type IN ('CASUAL', 'SICK', 'EARNED', 'DUTY', 'MATERNITY', 'SABBATICAL')),
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL CHECK (end_date >= start_date),
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'SUBMITTED' CHECK (status IN ('DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'COMPLETED')),
+    approved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    approved_at TIMESTAMPTZ,
+    remarks TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_leave_requests_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS schedule_change_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    faculty_id UUID NOT NULL REFERENCES faculty(id) ON DELETE CASCADE,
+    slot_id UUID NOT NULL REFERENCES timetable_slots(id) ON DELETE CASCADE,
+    requested_day TEXT NOT NULL CHECK (requested_day IN ('MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY')),
+    requested_start TIME NOT NULL,
+    requested_end TIME NOT NULL CHECK (requested_end > requested_start),
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'SUBMITTED' CHECK (status IN ('DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'COMPLETED')),
+    reviewed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_schedule_change_requests_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS grievance_tickets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    category TEXT NOT NULL CHECK (category IN ('ACADEMIC', 'FINANCE', 'FACILITY', 'EXAMINATION', 'HARASSMENT', 'OTHER')),
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'IN_PROGRESS', 'WAITING_FOR_RESPONSE', 'RESOLVED', 'CLOSED', 'REJECTED')),
+    priority TEXT NOT NULL DEFAULT 'MEDIUM' CHECK (priority IN ('LOW', 'MEDIUM', 'HIGH', 'URGENT')),
+    assigned_to UUID REFERENCES users(id) ON DELETE SET NULL,
+    resolved_at TIMESTAMPTZ,
+    resolution_notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_grievance_tickets_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_grievance_tickets_tenant_status_assigned ON grievance_tickets(tenant_id, status, assigned_to);
+
+-- ================================================================================
+-- 7. COMMUNICATION & GOVERNANCE
+-- ================================================================================
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    sent_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    offering_id UUID REFERENCES course_offerings(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    target_role TEXT CHECK (target_role IN ('ADMIN', 'FACULTY', 'STUDENT', 'ALL')),
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_notifications_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_tenant_sent_at ON notifications(tenant_id, sent_at);
+
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    notification_id UUID NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL CHECK (channel IN ('IN_APP', 'EMAIL', 'SMS', 'PUSH')),
+    status TEXT NOT NULL DEFAULT 'DELIVERED' CHECK (status IN ('PENDING', 'SENT', 'DELIVERED', 'FAILED')),
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    read_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_notification_deliveries_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_tenant_user_read ON notification_deliveries(tenant_id, user_id, read_at);
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    conv_type TEXT NOT NULL CHECK (conv_type IN ('DIRECT', 'GROUP')),
+    title TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_conversations_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS conversation_participants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    last_read_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_conversation_participants_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_conversation_participants_tenant_conv_user UNIQUE (tenant_id, conversation_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    sender_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    parent_id UUID REFERENCES messages(id) ON DELETE SET NULL,
+    body TEXT NOT NULL,
+    search_vector TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', body)) STORED,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_messages_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_conv_sent ON messages(tenant_id, conversation_id, sent_at);
+CREATE INDEX IF NOT EXISTS idx_messages_search_vector ON messages USING GIN (search_vector);
+
+CREATE TABLE IF NOT EXISTS message_attachments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    file_id UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_message_attachments_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_message_attachments_tenant_msg_file UNIQUE (tenant_id, message_id, file_id)
+);
+
+CREATE TABLE IF NOT EXISTS discussion_threads (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    offering_id UUID NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    is_locked BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_discussion_threads_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_discussion_threads_tenant_offering ON discussion_threads(tenant_id, offering_id);
+
+CREATE TABLE IF NOT EXISTS discussion_posts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    thread_id UUID NOT NULL REFERENCES discussion_threads(id) ON DELETE CASCADE,
+    author_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    parent_post_id UUID REFERENCES discussion_posts(id) ON DELETE SET NULL,
+    body TEXT NOT NULL,
+    search_vector TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', body)) STORED,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_discussion_posts_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_discussion_posts_tenant_thread_created ON discussion_posts(tenant_id, thread_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_discussion_posts_search_vector ON discussion_posts USING GIN (search_vector);
+
+CREATE TABLE IF NOT EXISTS compliance_records (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    department_id UUID REFERENCES departments(id) ON DELETE SET NULL,
+    requirement TEXT NOT NULL,
+    owner_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    submission_date DATE NOT NULL,
+    expiry_date DATE,
+    status TEXT NOT NULL DEFAULT 'COMPLIANT' CHECK (status IN ('PENDING', 'COMPLIANT', 'NON_COMPLIANT', 'EXPIRING_SOON', 'EXPIRED')),
+    remarks TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_compliance_records_tenant_id UNIQUE (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_compliance_records_tenant_expiry ON compliance_records(tenant_id, expiry_date);
+
+CREATE TABLE IF NOT EXISTS compliance_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    compliance_id UUID NOT NULL REFERENCES compliance_records(id) ON DELETE CASCADE,
+    version_no INT NOT NULL DEFAULT 1,
+    file_id UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    uploaded_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_compliance_versions_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_compliance_versions_tenant_comp_ver UNIQUE (tenant_id, compliance_id, version_no)
+);
+
+CREATE TABLE IF NOT EXISTS analytics_reports (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    report_type TEXT NOT NULL,
+    generated_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    department_id UUID REFERENCES departments(id) ON DELETE SET NULL,
+    term_id UUID REFERENCES terms(id) ON DELETE SET NULL,
+    parameters JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'COMPLETED' CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
+    file_id UUID REFERENCES files(id) ON DELETE SET NULL,
+    generated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_analytics_reports_tenant_id UNIQUE (tenant_id, id)
+);
+
+-- ================================================================================
+-- Schema successfully defined for 57 tables!
+-- ================================================================================
+
+
+-- ================================================================================
+-- PART 2: DATA INSERTION COMMANDS (All Existing Records)
+-- ================================================================================
+-- ================================================================================
+-- NEXORA Multi-Tenant Architecture — Complete Data Insertion Dump
+-- Dump Generated At: 2026-10-14 19:54:45 UTC
+-- Target Database: PostgreSQL 16 (Compatible with PostgreSQL 14+)
+-- Primary Student: Sanjay H S (sanjudeepu.153@gmail.com)
+-- Note: Safe idempotent inserts using ON CONFLICT DO NOTHING
+-- ================================================================================
+
+BEGIN;
+SET session_replication_role = 'replica';
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: tenants (2 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO tenants (id, slug, name, status, settings, created_at, updated_at) VALUES
+  ('11111111-1111-1111-1111-111111111111', 'apex-institute', 'Apex Institute of Technology & Management', 'ACTIVE', '{"branding": {"logo_url": "https://assets.nexora.edu/branding/apex-logo.svg", "college_code": "APEX-2026", "primary_color": "#2563eb"}, "currency": "INR", "timezone": "Asia/Kolkata", "thresholds": {"passing_grade_pct": 40.0, "min_attendance_pct": 75.0, "max_course_credits_per_term": 26}}'::jsonb, '2026-10-14T14:10:57.044889+00:00', '2026-10-14T14:10:57.044893+00:00'),
+  ('22222222-2222-2222-2222-222222222222', 'metro-uni', 'Metropolitan University of Science & Technology', 'ACTIVE', '{"branding": {"logo_url": "https://assets.nexora.edu/branding/metro-logo.svg", "college_code": "MUST-1998", "primary_color": "#0d9488"}, "currency": "INR", "timezone": "Asia/Kolkata", "thresholds": {"passing_grade_pct": 45.0, "min_attendance_pct": 80.0, "max_course_credits_per_term": 28}}'::jsonb, '2026-10-14T14:10:57.044895+00:00', '2026-10-14T14:10:57.044896+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: platform_operators (1 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO platform_operators (id, email, password_hash, status, last_login_at, created_at, updated_at) VALUES
+  ('00000000-0000-0000-0000-000000000001', 'superadmin@nexoracloud.com', '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, '2026-10-14T14:10:57.009170+00:00', '2026-10-14T14:10:57.040249+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: users (62 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO users (id, tenant_id, role, email, first_name, last_name, avatar_url, password_hash, status, last_login_at, failed_login_count, locked_until, deleted_at, created_at, updated_at) VALUES
+  ('aaaaaaaa-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'ADMIN', 'admin@apex.edu', 'Dr. Rajesh', 'Sharma', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.048640+00:00', '2026-10-14T14:10:57.048645+00:00'),
+  ('aaaaaaaa-0000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', 'ADMIN', 'admin@metro.edu', 'Dr. Vikramaditya', 'Sen', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.048647+00:00', '2026-10-14T14:10:57.048647+00:00'),
+  ('aaaaaaaa-0000-0000-0000-000000000011', '11111111-1111-1111-1111-111111111111', 'FACULTY', 'hod.cse@apex.edu', 'Dr. Aris', 'Thorne', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.061451+00:00', '2026-10-14T14:10:57.061454+00:00'),
+  ('aaaaaaaa-0000-0000-0000-000000000012', '11111111-1111-1111-1111-111111111111', 'FACULTY', 'prof.priya@apex.edu', 'Dr. Priya', 'Nair', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.063628+00:00', '2026-10-14T14:10:57.063631+00:00'),
+  ('aaaaaaaa-0000-0000-0000-000000000013', '11111111-1111-1111-1111-111111111111', 'FACULTY', 'prof.amitabha@apex.edu', 'Dr. Amitabha', 'Roy', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.069755+00:00', '2026-10-14T14:10:57.069758+00:00'),
+  ('aaaaaaaa-0000-0000-0000-000000000014', '11111111-1111-1111-1111-111111111111', 'FACULTY', 'prof.vikram@apex.edu', 'Dr. Vikram', 'Malhotra', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.073558+00:00', '2026-10-14T14:10:57.073561+00:00'),
+  ('aaaaaaaa-0000-0000-0000-000000000015', '11111111-1111-1111-1111-111111111111', 'FACULTY', 'prof.sneha@apex.edu', 'Dr. Sneha', 'Kulkarni', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.076800+00:00', '2026-10-14T14:10:57.076803+00:00'),
+  ('aaaaaaaa-0000-0000-0000-000000000016', '22222222-2222-2222-2222-222222222222', 'FACULTY', 'hod.cse@metro.edu', 'Dr. Arvind', 'Menon', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.081117+00:00', '2026-10-14T14:10:57.081120+00:00'),
+  ('aaaaaaaa-0000-0000-0000-000000000017', '22222222-2222-2222-2222-222222222222', 'FACULTY', 'prof.shalini@metro.edu', 'Dr. Shalini', 'Mukherjee', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.085437+00:00', '2026-10-14T14:10:57.085440+00:00'),
+  ('aaaaaaaa-0000-0000-0000-000000000018', '22222222-2222-2222-2222-222222222222', 'FACULTY', 'hod.it@metro.edu', 'Dr. Rahul', 'Deshmukh', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.088874+00:00', '2026-10-14T14:10:57.088876+00:00'),
+  ('aaaaaaaa-0000-0000-0000-000000000019', '22222222-2222-2222-2222-222222222222', 'FACULTY', 'prof.meera@metro.edu', 'Dr. Meera', 'Nambiar', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.092251+00:00', '2026-10-14T14:10:57.092255+00:00'),
+  ('aaaaaaaa-0000-0000-0000-000000000020', '22222222-2222-2222-2222-222222222222', 'FACULTY', 'hod.dsai@metro.edu', 'Dr. Karthik', 'Raman', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.096129+00:00', '2026-10-14T14:10:57.096132+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'sanjudeepu.153@gmail.com', 'Sanjay', 'H S', NULL, '$2b$12$o45LmGhmxajUmZsulz8yW.S27DPhagMujyi.9MIPMAClzo2Tjjjbm', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.137073+00:00', '2026-10-14T14:10:57.137076+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.nirmala.g2@apex.edu', 'Nirmala', 'G', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.139646+00:00', '2026-10-14T14:10:57.139650+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.nisarga.bg3@apex.edu', 'Nisarga', 'B G', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.145767+00:00', '2026-10-14T14:10:57.145770+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.nishanth.ck4@apex.edu', 'Nishanth', 'C K', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.150660+00:00', '2026-10-14T14:10:57.150665+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.pavanraj.shettysr5@apex.edu', 'Pavanraj', 'Shetty S R', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.155071+00:00', '2026-10-14T14:10:57.155076+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000006', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.pooja6@apex.edu', 'Pooja', '', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.159136+00:00', '2026-10-14T14:10:57.159139+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000007', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.prajwal.gowdad7@apex.edu', 'Prajwal', 'Gowda D', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.162852+00:00', '2026-10-14T14:10:57.163042+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000008', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.prarthana.riar8@apex.edu', 'Prarthana', 'Ria R', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.169989+00:00', '2026-10-14T14:10:57.169992+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000009', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.preetham.ha9@apex.edu', 'Preetham', 'H A', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.173822+00:00', '2026-10-14T14:10:57.173824+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000010', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.prekshith.mk10@apex.edu', 'Prekshith', 'M K', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.177995+00:00', '2026-10-14T14:10:57.177998+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000011', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.sahana11@apex.edu', 'Sahana', '', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.182915+00:00', '2026-10-14T14:10:57.182924+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000012', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.sanika.cb12@apex.edu', 'Sanika', 'C B', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.186972+00:00', '2026-10-14T14:10:57.186975+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000013', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.shalini.mr13@apex.edu', 'Shalini', 'M R', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.190041+00:00', '2026-10-14T14:10:57.190044+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000014', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.shashank.hm14@apex.edu', 'Shashank', 'H M', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.198189+00:00', '2026-10-14T14:10:57.198199+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000015', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.shreyas.km15@apex.edu', 'Shreyas', 'K M', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.203551+00:00', '2026-10-14T14:10:57.203553+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000016', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.shreyas.va16@apex.edu', 'Shreyas', 'V A', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.206648+00:00', '2026-10-14T14:10:57.206650+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000017', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.shwetha.cs17@apex.edu', 'Shwetha', 'C S', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.209589+00:00', '2026-10-14T14:10:57.209591+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000018', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.soujanya.hm18@apex.edu', 'Soujanya', 'H M', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.212232+00:00', '2026-10-14T14:10:57.212234+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000019', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.srujana.ka19@apex.edu', 'Srujana', 'K A', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.217407+00:00', '2026-10-14T14:10:57.217410+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000020', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.suprith.tm20@apex.edu', 'Suprith', 'T M', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.220246+00:00', '2026-10-14T14:10:57.220248+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000021', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.tarun.gowdaal21@apex.edu', 'Tarun', 'Gowda A L', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.222905+00:00', '2026-10-14T14:10:57.222907+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000022', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.tejal.shekar22@apex.edu', 'Tejal', 'Shekar', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.225436+00:00', '2026-10-14T14:10:57.225438+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000023', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.nirmala.g23@apex.edu', 'Nirmala', 'G', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.228063+00:00', '2026-10-14T14:10:57.228065+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000024', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.nisarga.bg24@apex.edu', 'Nisarga', 'B G', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.233349+00:00', '2026-10-14T14:10:57.233353+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000025', '11111111-1111-1111-1111-111111111111', 'STUDENT', 'student.nishanth.ck25@apex.edu', 'Nishanth', 'C K', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.236394+00:00', '2026-10-14T14:10:57.236396+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000026', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.pavanraj.shettysr26@metro.edu', 'Pavanraj', 'Shetty S R', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.238745+00:00', '2026-10-14T14:10:57.238747+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000027', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.pooja27@metro.edu', 'Pooja', '', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.241212+00:00', '2026-10-14T14:10:57.241213+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000028', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.prajwal.gowdad28@metro.edu', 'Prajwal', 'Gowda D', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.243926+00:00', '2026-10-14T14:10:57.243928+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000029', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.prarthana.riar29@metro.edu', 'Prarthana', 'Ria R', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.246503+00:00', '2026-10-14T14:10:57.246505+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000030', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.preetham.ha30@metro.edu', 'Preetham', 'H A', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.251227+00:00', '2026-10-14T14:10:57.251229+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000031', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.prekshith.mk31@metro.edu', 'Prekshith', 'M K', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.254060+00:00', '2026-10-14T14:10:57.254062+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000032', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.sahana32@metro.edu', 'Sahana', '', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.257051+00:00', '2026-10-14T14:10:57.257052+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000033', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.sanika.cb33@metro.edu', 'Sanika', 'C B', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.259718+00:00', '2026-10-14T14:10:57.259719+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000034', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.shalini.mr34@metro.edu', 'Shalini', 'M R', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.262429+00:00', '2026-10-14T14:10:57.262431+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000035', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.shashank.hm35@metro.edu', 'Shashank', 'H M', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.268425+00:00', '2026-10-14T14:10:57.268427+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000036', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.shreyas.km36@metro.edu', 'Shreyas', 'K M', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.271003+00:00', '2026-10-14T14:10:57.271005+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000037', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.shreyas.va37@metro.edu', 'Shreyas', 'V A', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.273809+00:00', '2026-10-14T14:10:57.273811+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000038', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.shwetha.cs38@metro.edu', 'Shwetha', 'C S', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.276264+00:00', '2026-10-14T14:10:57.276265+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000039', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.soujanya.hm39@metro.edu', 'Soujanya', 'H M', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.278983+00:00', '2026-10-14T14:10:57.278986+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000040', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.srujana.ka40@metro.edu', 'Srujana', 'K A', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.285434+00:00', '2026-10-14T14:10:57.285437+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000041', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.suprith.tm41@metro.edu', 'Suprith', 'T M', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.288405+00:00', '2026-10-14T14:10:57.288407+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000042', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.tarun.gowdaal42@metro.edu', 'Tarun', 'Gowda A L', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.290655+00:00', '2026-10-14T14:10:57.290658+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000043', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.tejal.shekar43@metro.edu', 'Tejal', 'Shekar', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.293549+00:00', '2026-10-14T14:10:57.293551+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000044', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.nirmala.g44@metro.edu', 'Nirmala', 'G', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.296604+00:00', '2026-10-14T14:10:57.296606+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000045', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.nisarga.bg45@metro.edu', 'Nisarga', 'B G', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.301735+00:00', '2026-10-14T14:10:57.301737+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000046', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.nishanth.ck46@metro.edu', 'Nishanth', 'C K', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.304357+00:00', '2026-10-14T14:10:57.304359+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000047', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.pavanraj.shettysr47@metro.edu', 'Pavanraj', 'Shetty S R', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.306989+00:00', '2026-10-14T14:10:57.306991+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000048', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.pooja48@metro.edu', 'Pooja', '', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.310558+00:00', '2026-10-14T14:10:57.310561+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000049', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.prajwal.gowdad49@metro.edu', 'Prajwal', 'Gowda D', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.316853+00:00', '2026-10-14T14:10:57.316856+00:00'),
+  ('eeeeeeee-0000-0000-0000-000000000050', '22222222-2222-2222-2222-222222222222', 'STUDENT', 'student.prarthana.riar50@metro.edu', 'Prarthana', 'Ria R', NULL, '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O', 'ACTIVE', NULL, 0, NULL, NULL, '2026-10-14T14:10:57.322001+00:00', '2026-10-14T14:10:57.322003+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: departments (6 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO departments (id, tenant_id, name, code, head_faculty_id, budget, established_on, created_at, updated_at) VALUES
+  ('bbbbbbbb-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'Department of Computer Science & Engineering', 'CSE', 'cccccccc-0000-0000-0000-000000000001', 15000000.00, '2010-06-15', '2026-10-14T14:10:57.052587+00:00', '2026-10-14T14:10:57.052590+00:00'),
+  ('bbbbbbbb-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'Department of Electronics & Communication Engineering', 'ECE', 'cccccccc-0000-0000-0000-000000000004', 12000000.00, '2012-08-01', '2026-10-14T14:10:57.052592+00:00', '2026-10-14T14:10:57.052592+00:00'),
+  ('bbbbbbbb-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', 'Department of Mechanical Engineering', 'ME', 'cccccccc-0000-0000-0000-000000000005', 10000000.00, '2014-07-20', '2026-10-14T14:10:57.052593+00:00', '2026-10-14T14:10:57.052593+00:00'),
+  ('bbbbbbbb-0000-0000-0000-000000000004', '22222222-2222-2222-2222-222222222222', 'School of Computer Science & Engineering', 'CSE', 'cccccccc-0000-0000-0000-000000000006', 20000000.00, '2005-04-10', '2026-10-14T14:10:57.052594+00:00', '2026-10-14T14:10:57.052594+00:00'),
+  ('bbbbbbbb-0000-0000-0000-000000000005', '22222222-2222-2222-2222-222222222222', 'Department of Information Technology', 'IT', 'cccccccc-0000-0000-0000-000000000008', 14000000.00, '2008-09-01', '2026-10-14T14:10:57.052595+00:00', '2026-10-14T14:10:57.052595+00:00'),
+  ('bbbbbbbb-0000-0000-0000-000000000006', '22222222-2222-2222-2222-222222222222', 'Department of Data Science & Artificial Intelligence', 'DSAI', 'cccccccc-0000-0000-0000-000000000010', 18000000.00, '2021-01-15', '2026-10-14T14:10:57.052596+00:00', '2026-10-14T14:10:57.052596+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: programmes (6 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO programmes (id, tenant_id, department_id, name, code, duration_terms, degree_level, created_at, updated_at) VALUES
+  ('dddddddd-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'bbbbbbbb-0000-0000-0000-000000000001', 'Bachelor of Technology in Computer Science & Engineering', 'BTECH-CSE', 8, 'UNDERGRADUATE', '2026-10-14T14:10:57.056058+00:00', '2026-10-14T14:10:57.056062+00:00'),
+  ('dddddddd-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'bbbbbbbb-0000-0000-0000-000000000002', 'Bachelor of Technology in Electronics & Communication Engineering', 'BTECH-ECE', 8, 'UNDERGRADUATE', '2026-10-14T14:10:57.056063+00:00', '2026-10-14T14:10:57.056064+00:00'),
+  ('dddddddd-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', 'bbbbbbbb-0000-0000-0000-000000000001', 'Master of Technology in Artificial Intelligence & Data Science', 'MTECH-AIDS', 4, 'POSTGRADUATE', '2026-10-14T14:10:57.056064+00:00', '2026-10-14T14:10:57.056065+00:00'),
+  ('dddddddd-0000-0000-0000-000000000004', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000004', 'Bachelor of Technology in Computer Science', 'BTECH-CS', 8, 'UNDERGRADUATE', '2026-10-14T14:10:57.056065+00:00', '2026-10-14T14:10:57.056065+00:00'),
+  ('dddddddd-0000-0000-0000-000000000005', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000005', 'Bachelor of Technology in Information Technology', 'BTECH-IT', 8, 'UNDERGRADUATE', '2026-10-14T14:10:57.056066+00:00', '2026-10-14T14:10:57.056066+00:00'),
+  ('dddddddd-0000-0000-0000-000000000006', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000006', 'Bachelor of Technology in Data Science & Artificial Intelligence', 'BTECH-DSAI', 8, 'UNDERGRADUATE', '2026-10-14T14:10:57.056067+00:00', '2026-10-14T14:10:57.056067+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: faculty (10 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO faculty (id, tenant_id, user_id, department_id, employee_no, designation, deleted_at, created_at, updated_at) VALUES
+  ('cccccccc-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000011', 'bbbbbbbb-0000-0000-0000-000000000001', 'FAC-CSE-001', 'Professor & Head of Department', NULL, '2026-10-14T14:10:57.066802+00:00', '2026-10-14T14:10:57.066806+00:00'),
+  ('cccccccc-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000012', 'bbbbbbbb-0000-0000-0000-000000000001', 'FAC-CSE-002', 'Associate Professor', NULL, '2026-10-14T14:10:57.071572+00:00', '2026-10-14T14:10:57.071576+00:00'),
+  ('cccccccc-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000013', 'bbbbbbbb-0000-0000-0000-000000000001', 'FAC-CSE-003', 'Assistant Professor', NULL, '2026-10-14T14:10:57.074983+00:00', '2026-10-14T14:10:57.074985+00:00'),
+  ('cccccccc-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000014', 'bbbbbbbb-0000-0000-0000-000000000002', 'FAC-ECE-001', 'Professor & Head of Department', NULL, '2026-10-14T14:10:57.078190+00:00', '2026-10-14T14:10:57.078192+00:00'),
+  ('cccccccc-0000-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000015', 'bbbbbbbb-0000-0000-0000-000000000003', 'FAC-ME-001', 'Associate Professor & Head of Department', NULL, '2026-10-14T14:10:57.083296+00:00', '2026-10-14T14:10:57.083299+00:00'),
+  ('cccccccc-0000-0000-0000-000000000006', '22222222-2222-2222-2222-222222222222', 'aaaaaaaa-0000-0000-0000-000000000016', 'bbbbbbbb-0000-0000-0000-000000000004', 'FAC-CSE-101', 'Professor & Dean', NULL, '2026-10-14T14:10:57.086972+00:00', '2026-10-14T14:10:57.086977+00:00'),
+  ('cccccccc-0000-0000-0000-000000000007', '22222222-2222-2222-2222-222222222222', 'aaaaaaaa-0000-0000-0000-000000000017', 'bbbbbbbb-0000-0000-0000-000000000004', 'FAC-CSE-102', 'Associate Professor', NULL, '2026-10-14T14:10:57.090391+00:00', '2026-10-14T14:10:57.090394+00:00'),
+  ('cccccccc-0000-0000-0000-000000000008', '22222222-2222-2222-2222-222222222222', 'aaaaaaaa-0000-0000-0000-000000000018', 'bbbbbbbb-0000-0000-0000-000000000005', 'FAC-IT-101', 'Professor & Head of Department', NULL, '2026-10-14T14:10:57.093919+00:00', '2026-10-14T14:10:57.093922+00:00'),
+  ('cccccccc-0000-0000-0000-000000000009', '22222222-2222-2222-2222-222222222222', 'aaaaaaaa-0000-0000-0000-000000000019', 'bbbbbbbb-0000-0000-0000-000000000005', 'FAC-IT-102', 'Assistant Professor', NULL, '2026-10-14T14:10:57.097716+00:00', '2026-10-14T14:10:57.097719+00:00'),
+  ('cccccccc-0000-0000-0000-000000000010', '22222222-2222-2222-2222-222222222222', 'aaaaaaaa-0000-0000-0000-000000000020', 'bbbbbbbb-0000-0000-0000-000000000006', 'FAC-DSAI-101', 'Professor & Head of Department', NULL, '2026-10-14T14:10:57.099412+00:00', '2026-10-14T14:10:57.099415+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: students (50 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO students (id, tenant_id, user_id, programme_id, roll_no, admission_year, current_term_no, status, deleted_at, created_at, updated_at) VALUES
+  ('eeeeeeee-1111-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000001', 'dddddddd-0000-0000-0000-000000000001', '2024CSE001', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.142507+00:00', '2026-10-14T14:10:57.142510+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000002', 'dddddddd-0000-0000-0000-000000000001', '2024CSE002', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.147947+00:00', '2026-10-14T14:10:57.147952+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000003', 'dddddddd-0000-0000-0000-000000000001', '2024CSE003', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.152625+00:00', '2026-10-14T14:10:57.152630+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000004', 'dddddddd-0000-0000-0000-000000000001', '2024CSE004', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.157188+00:00', '2026-10-14T14:10:57.157191+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000005', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000005', 'dddddddd-0000-0000-0000-000000000001', '2024CSE005', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.160805+00:00', '2026-10-14T14:10:57.160808+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000006', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000006', 'dddddddd-0000-0000-0000-000000000001', '2024CSE006', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.166796+00:00', '2026-10-14T14:10:57.166805+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000007', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000007', 'dddddddd-0000-0000-0000-000000000001', '2024CSE007', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.171951+00:00', '2026-10-14T14:10:57.171953+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000008', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000008', 'dddddddd-0000-0000-0000-000000000001', '2024CSE008', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.175940+00:00', '2026-10-14T14:10:57.175943+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000009', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000009', 'dddddddd-0000-0000-0000-000000000001', '2024CSE009', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.179671+00:00', '2026-10-14T14:10:57.179674+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000010', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000010', 'dddddddd-0000-0000-0000-000000000001', '2024CSE010', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.185018+00:00', '2026-10-14T14:10:57.185021+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000011', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000011', 'dddddddd-0000-0000-0000-000000000001', '2024CSE011', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.188531+00:00', '2026-10-14T14:10:57.188533+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000012', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000012', 'dddddddd-0000-0000-0000-000000000001', '2024CSE012', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.193294+00:00', '2026-10-14T14:10:57.193297+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000013', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000013', 'dddddddd-0000-0000-0000-000000000001', '2024CSE013', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.201522+00:00', '2026-10-14T14:10:57.201527+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000014', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000014', 'dddddddd-0000-0000-0000-000000000001', '2024CSE014', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.205061+00:00', '2026-10-14T14:10:57.205063+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000015', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000015', 'dddddddd-0000-0000-0000-000000000001', '2024CSE015', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.207936+00:00', '2026-10-14T14:10:57.207938+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000016', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000016', 'dddddddd-0000-0000-0000-000000000002', '2024ECE001', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.210725+00:00', '2026-10-14T14:10:57.210727+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000017', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000017', 'dddddddd-0000-0000-0000-000000000002', '2024ECE002', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.214241+00:00', '2026-10-14T14:10:57.214248+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000018', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000018', 'dddddddd-0000-0000-0000-000000000002', '2024ECE003', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.218694+00:00', '2026-10-14T14:10:57.218696+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000019', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000019', 'dddddddd-0000-0000-0000-000000000002', '2024ECE004', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.221455+00:00', '2026-10-14T14:10:57.221457+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000020', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000020', 'dddddddd-0000-0000-0000-000000000002', '2024ECE005', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.224066+00:00', '2026-10-14T14:10:57.224068+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000021', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000021', 'dddddddd-0000-0000-0000-000000000002', '2024ECE006', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.226544+00:00', '2026-10-14T14:10:57.226546+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000022', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000022', 'dddddddd-0000-0000-0000-000000000003', '2024AI001', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.229215+00:00', '2026-10-14T14:10:57.229217+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000023', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000023', 'dddddddd-0000-0000-0000-000000000003', '2024AI002', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.234921+00:00', '2026-10-14T14:10:57.234923+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000024', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000024', 'dddddddd-0000-0000-0000-000000000003', '2024AI003', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.237419+00:00', '2026-10-14T14:10:57.237422+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000025', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-0000-0000-0000-000000000025', 'dddddddd-0000-0000-0000-000000000003', '2024AI004', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.239829+00:00', '2026-10-14T14:10:57.239830+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000026', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000026', 'dddddddd-0000-0000-0000-000000000004', '2024CS101', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.242422+00:00', '2026-10-14T14:10:57.242424+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000027', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000027', 'dddddddd-0000-0000-0000-000000000004', '2024CS102', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.245141+00:00', '2026-10-14T14:10:57.245144+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000028', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000028', 'dddddddd-0000-0000-0000-000000000004', '2024CS103', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.249488+00:00', '2026-10-14T14:10:57.249492+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000029', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000029', 'dddddddd-0000-0000-0000-000000000004', '2024CS104', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.252623+00:00', '2026-10-14T14:10:57.252626+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000030', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000030', 'dddddddd-0000-0000-0000-000000000004', '2024CS105', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.255666+00:00', '2026-10-14T14:10:57.255668+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000031', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000031', 'dddddddd-0000-0000-0000-000000000004', '2024CS106', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.258153+00:00', '2026-10-14T14:10:57.258155+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000032', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000032', 'dddddddd-0000-0000-0000-000000000004', '2024CS107', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.260845+00:00', '2026-10-14T14:10:57.260846+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000033', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000033', 'dddddddd-0000-0000-0000-000000000004', '2024CS108', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.265636+00:00', '2026-10-14T14:10:57.265642+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000034', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000034', 'dddddddd-0000-0000-0000-000000000004', '2024CS109', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.269643+00:00', '2026-10-14T14:10:57.269645+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000035', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000035', 'dddddddd-0000-0000-0000-000000000004', '2024CS110', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.272374+00:00', '2026-10-14T14:10:57.272375+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000036', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000036', 'dddddddd-0000-0000-0000-000000000005', '2024IT101', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.274808+00:00', '2026-10-14T14:10:57.274810+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000037', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000037', 'dddddddd-0000-0000-0000-000000000005', '2024IT102', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.277239+00:00', '2026-10-14T14:10:57.277241+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000038', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000038', 'dddddddd-0000-0000-0000-000000000005', '2024IT103', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.281075+00:00', '2026-10-14T14:10:57.281085+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000039', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000039', 'dddddddd-0000-0000-0000-000000000005', '2024IT104', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.286906+00:00', '2026-10-14T14:10:57.286908+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000040', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000040', 'dddddddd-0000-0000-0000-000000000005', '2024IT105', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.289430+00:00', '2026-10-14T14:10:57.289432+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000041', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000041', 'dddddddd-0000-0000-0000-000000000005', '2024IT106', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.292085+00:00', '2026-10-14T14:10:57.292087+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000042', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000042', 'dddddddd-0000-0000-0000-000000000005', '2024IT107', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.294895+00:00', '2026-10-14T14:10:57.294917+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000043', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000043', 'dddddddd-0000-0000-0000-000000000005', '2024IT108', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.299988+00:00', '2026-10-14T14:10:57.299992+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000044', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000044', 'dddddddd-0000-0000-0000-000000000006', '2024DS101', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.303014+00:00', '2026-10-14T14:10:57.303016+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000045', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000045', 'dddddddd-0000-0000-0000-000000000006', '2024DS102', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.305549+00:00', '2026-10-14T14:10:57.305551+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000046', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000046', 'dddddddd-0000-0000-0000-000000000006', '2024DS103', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.308009+00:00', '2026-10-14T14:10:57.308011+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000047', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000047', 'dddddddd-0000-0000-0000-000000000006', '2024DS104', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.312445+00:00', '2026-10-14T14:10:57.312447+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000048', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000048', 'dddddddd-0000-0000-0000-000000000006', '2024DS105', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.319181+00:00', '2026-10-14T14:10:57.319184+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000049', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000049', 'dddddddd-0000-0000-0000-000000000006', '2024DS106', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.323802+00:00', '2026-10-14T14:10:57.323805+00:00'),
+  ('eeeeeeee-1111-0000-0000-000000000050', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-0000-0000-0000-000000000050', 'dddddddd-0000-0000-0000-000000000006', '2024DS107', 2024, 5, 'ACTIVE', NULL, '2026-10-14T14:10:57.325191+00:00', '2026-10-14T14:10:57.325193+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: academic_years (2 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO academic_years (id, tenant_id, label, start_date, end_date, status, published_by, published_at, created_at, updated_at) VALUES
+  ('ffffffff-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', '2026-27', '2026-07-01', '2027-06-30', 'PUBLISHED', 'aaaaaaaa-0000-0000-0000-000000000001', '2026-10-14T14:10:57.109007+00:00', '2026-10-14T14:10:57.110164+00:00', '2026-10-14T14:10:57.110167+00:00'),
+  ('ffffffff-0000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', '2026-27', '2026-07-01', '2027-06-30', 'PUBLISHED', 'aaaaaaaa-0000-0000-0000-000000000002', '2026-10-14T14:10:57.109064+00:00', '2026-10-14T14:10:57.110168+00:00', '2026-10-14T14:10:57.110169+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: terms (4 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO terms (id, tenant_id, academic_year_id, name, term_no, start_date, end_date, enrolment_opens_at, enrolment_closes_at, is_current, created_at, updated_at) VALUES
+  ('10101010-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'ffffffff-0000-0000-0000-000000000001', 'Fall 2026 (Semester 5)', 5, '2026-08-01', '2026-12-15', NULL, NULL, TRUE, '2026-10-14T14:10:57.113310+00:00', '2026-10-14T14:10:57.113313+00:00'),
+  ('10101010-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'ffffffff-0000-0000-0000-000000000001', 'Spring 2027 (Semester 6)', 6, '2027-01-05', '2027-05-20', NULL, NULL, FALSE, '2026-10-14T14:10:57.113314+00:00', '2026-10-14T14:10:57.113315+00:00'),
+  ('10101010-0000-0000-0000-000000000003', '22222222-2222-2222-2222-222222222222', 'ffffffff-0000-0000-0000-000000000002', 'Fall 2026 (Term 5)', 5, '2026-08-01', '2026-12-15', NULL, NULL, TRUE, '2026-10-14T14:10:57.113315+00:00', '2026-10-14T14:10:57.113316+00:00'),
+  ('10101010-0000-0000-0000-000000000004', '22222222-2222-2222-2222-222222222222', 'ffffffff-0000-0000-0000-000000000002', 'Spring 2027 (Term 6)', 6, '2027-01-05', '2027-05-20', NULL, NULL, FALSE, '2026-10-14T14:10:57.113316+00:00', '2026-10-14T14:10:57.113316+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: rooms (5 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO rooms (id, tenant_id, code, room_type, capacity, building, floor, created_at, updated_at) VALUES
+  ('20202020-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'LH-101', 'CLASSROOM', 80, 'Aryabhata Block', 1, '2026-10-14T14:10:57.117326+00:00', '2026-10-14T14:10:57.117329+00:00'),
+  ('20202020-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'LAB-204', 'LAB', 40, 'Turing Complex', 2, '2026-10-14T14:10:57.117330+00:00', '2026-10-14T14:10:57.117331+00:00'),
+  ('20202020-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', 'AUD-01', 'AUDITORIUM', 300, 'Main Administration', 1, '2026-10-14T14:10:57.117332+00:00', '2026-10-14T14:10:57.117332+00:00'),
+  ('20202020-0000-0000-0000-000000000004', '22222222-2222-2222-2222-222222222222', 'CR-301', 'CLASSROOM', 70, 'Science Block A', 3, '2026-10-14T14:10:57.117333+00:00', '2026-10-14T14:10:57.117333+00:00'),
+  ('20202020-0000-0000-0000-000000000005', '22222222-2222-2222-2222-222222222222', 'AI-LAB-1', 'LAB', 45, 'Innovation Tower', 4, '2026-10-14T14:10:57.117333+00:00', '2026-10-14T14:10:57.117334+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: courses (7 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO courses (id, tenant_id, department_id, course_code, title, description, credits, syllabus_file_id, status, deleted_at, created_at, updated_at) VALUES
+  ('40404040-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'bbbbbbbb-0000-0000-0000-000000000001', 'CS301', 'Database Management Systems', NULL, 4, NULL, 'ACTIVE', NULL, '2026-10-14T14:10:57.120810+00:00', '2026-10-14T14:10:57.120814+00:00'),
+  ('40404040-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'bbbbbbbb-0000-0000-0000-000000000001', 'CS302', 'Operating Systems & Architecture', NULL, 4, NULL, 'ACTIVE', NULL, '2026-10-14T14:10:57.120816+00:00', '2026-10-14T14:10:57.120816+00:00'),
+  ('40404040-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', 'bbbbbbbb-0000-0000-0000-000000000002', 'EC301', 'Digital Signal Processing', NULL, 4, NULL, 'ACTIVE', NULL, '2026-10-14T14:10:57.120817+00:00', '2026-10-14T14:10:57.120818+00:00'),
+  ('40404040-0000-0000-0000-000000000004', '11111111-1111-1111-1111-111111111111', 'bbbbbbbb-0000-0000-0000-000000000003', 'ME301', 'Applied Thermodynamics', NULL, 4, NULL, 'ACTIVE', NULL, '2026-10-14T14:10:57.120818+00:00', '2026-10-14T14:10:57.120819+00:00'),
+  ('40404040-0000-0000-0000-000000000005', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000004', 'CS-311', 'Advanced Data Structures & Algorithms', NULL, 4, NULL, 'ACTIVE', NULL, '2026-10-14T14:10:57.120820+00:00', '2026-10-14T14:10:57.120821+00:00'),
+  ('40404040-0000-0000-0000-000000000006', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000005', 'IT-321', 'Full Stack Web Technologies', NULL, 4, NULL, 'ACTIVE', NULL, '2026-10-14T14:10:57.120821+00:00', '2026-10-14T14:10:57.120822+00:00'),
+  ('40404040-0000-0000-0000-000000000007', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000006', 'DS-331', 'Machine Learning & Neural Networks', NULL, 4, NULL, 'ACTIVE', NULL, '2026-10-14T14:10:57.120823+00:00', '2026-10-14T14:10:57.120824+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: programme_courses (7 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO programme_courses (id, tenant_id, programme_id, course_id, term_no, is_mandatory, created_at, updated_at) VALUES
+  ('14948da4-7b71-421b-af4a-dc8a2f0140c3', '11111111-1111-1111-1111-111111111111', 'dddddddd-0000-0000-0000-000000000001', '40404040-0000-0000-0000-000000000001', 5, TRUE, '2026-10-14T14:10:57.124515+00:00', '2026-10-14T14:10:57.124518+00:00'),
+  ('7a4e049b-8c84-402a-be50-3d54d64c1628', '11111111-1111-1111-1111-111111111111', 'dddddddd-0000-0000-0000-000000000001', '40404040-0000-0000-0000-000000000002', 5, TRUE, '2026-10-14T14:10:57.124523+00:00', '2026-10-14T14:10:57.124523+00:00'),
+  ('d0945633-a7e7-48da-8864-4bc63c028b05', '11111111-1111-1111-1111-111111111111', 'dddddddd-0000-0000-0000-000000000002', '40404040-0000-0000-0000-000000000003', 5, TRUE, '2026-10-14T14:10:57.124526+00:00', '2026-10-14T14:10:57.124526+00:00'),
+  ('aae8509b-d292-4b54-953b-9067933abc62', '11111111-1111-1111-1111-111111111111', 'dddddddd-0000-0000-0000-000000000003', '40404040-0000-0000-0000-000000000001', 1, TRUE, '2026-10-14T14:10:57.124527+00:00', '2026-10-14T14:10:57.124528+00:00'),
+  ('2de9c60b-c86d-4bc9-aa3d-e1c91c137d8c', '22222222-2222-2222-2222-222222222222', 'dddddddd-0000-0000-0000-000000000004', '40404040-0000-0000-0000-000000000005', 5, TRUE, '2026-10-14T14:10:57.124530+00:00', '2026-10-14T14:10:57.124530+00:00'),
+  ('5ff5ea39-f6d1-4908-b9d0-fe7da712b428', '22222222-2222-2222-2222-222222222222', 'dddddddd-0000-0000-0000-000000000005', '40404040-0000-0000-0000-000000000006', 5, TRUE, '2026-10-14T14:10:57.124532+00:00', '2026-10-14T14:10:57.124532+00:00'),
+  ('40165bd5-f77e-4b8c-89c4-2f7f87a528a4', '22222222-2222-2222-2222-222222222222', 'dddddddd-0000-0000-0000-000000000006', '40404040-0000-0000-0000-000000000007', 5, TRUE, '2026-10-14T14:10:57.124534+00:00', '2026-10-14T14:10:57.124535+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: course_offerings (6 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO course_offerings (id, tenant_id, course_id, term_id, faculty_id, section, capacity, status, created_at, updated_at) VALUES
+  ('50505050-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', '40404040-0000-0000-0000-000000000001', '10101010-0000-0000-0000-000000000001', 'cccccccc-0000-0000-0000-000000000001', 'A', 60, 'ACTIVE', '2026-10-14T14:10:57.128406+00:00', '2026-10-14T14:10:57.128409+00:00'),
+  ('50505050-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', '40404040-0000-0000-0000-000000000002', '10101010-0000-0000-0000-000000000001', 'cccccccc-0000-0000-0000-000000000002', 'A', 60, 'ACTIVE', '2026-10-14T14:10:57.128410+00:00', '2026-10-14T14:10:57.128411+00:00'),
+  ('50505050-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111', '40404040-0000-0000-0000-000000000003', '10101010-0000-0000-0000-000000000001', 'cccccccc-0000-0000-0000-000000000004', 'A', 60, 'ACTIVE', '2026-10-14T14:10:57.128411+00:00', '2026-10-14T14:10:57.128412+00:00'),
+  ('50505050-0000-0000-0000-000000000004', '22222222-2222-2222-2222-222222222222', '40404040-0000-0000-0000-000000000005', '10101010-0000-0000-0000-000000000003', 'cccccccc-0000-0000-0000-000000000006', 'A', 60, 'ACTIVE', '2026-10-14T14:10:57.128412+00:00', '2026-10-14T14:10:57.128413+00:00'),
+  ('50505050-0000-0000-0000-000000000005', '22222222-2222-2222-2222-222222222222', '40404040-0000-0000-0000-000000000006', '10101010-0000-0000-0000-000000000003', 'cccccccc-0000-0000-0000-000000000008', 'A', 60, 'ACTIVE', '2026-10-14T14:10:57.128413+00:00', '2026-10-14T14:10:57.128414+00:00'),
+  ('50505050-0000-0000-0000-000000000006', '22222222-2222-2222-2222-222222222222', '40404040-0000-0000-0000-000000000007', '10101010-0000-0000-0000-000000000003', 'cccccccc-0000-0000-0000-000000000010', 'A', 60, 'ACTIVE', '2026-10-14T14:10:57.128414+00:00', '2026-10-14T14:10:57.128414+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: timetable_slots (6 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO timetable_slots (id, tenant_id, offering_id, room_id, faculty_id, day_of_week, start_time, end_time, created_at, updated_at) VALUES
+  ('cd027b92-8666-46ff-8ea2-2364cb6d16aa', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', '20202020-0000-0000-0000-000000000001', 'cccccccc-0000-0000-0000-000000000001', 'MONDAY', '09:00:00', '10:30:00', '2026-10-14T14:10:57.133129+00:00', '2026-10-14T14:10:57.133132+00:00'),
+  ('e40813cc-6bc4-4687-8819-54f3d12d9884', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', '20202020-0000-0000-0000-000000000001', 'cccccccc-0000-0000-0000-000000000002', 'TUESDAY', '11:00:00', '12:30:00', '2026-10-14T14:10:57.133138+00:00', '2026-10-14T14:10:57.133139+00:00'),
+  ('242fe533-fed5-4544-9a83-c8d3f0606bc0', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', '20202020-0000-0000-0000-000000000002', 'cccccccc-0000-0000-0000-000000000004', 'WEDNESDAY', '14:00:00', '15:30:00', '2026-10-14T14:10:57.133141+00:00', '2026-10-14T14:10:57.133141+00:00'),
+  ('20aa4004-4935-49cc-ad91-4895a82ca13c', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', '20202020-0000-0000-0000-000000000004', 'cccccccc-0000-0000-0000-000000000006', 'MONDAY', '09:30:00', '11:00:00', '2026-10-14T14:10:57.133143+00:00', '2026-10-14T14:10:57.133143+00:00'),
+  ('177b2701-4799-447c-8092-0b3b1af4572c', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', '20202020-0000-0000-0000-000000000004', 'cccccccc-0000-0000-0000-000000000008', 'THURSDAY', '10:00:00', '11:30:00', '2026-10-14T14:10:57.133145+00:00', '2026-10-14T14:10:57.133146+00:00'),
+  ('fb9c0aec-813e-4fef-8c6c-423422208d64', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', '20202020-0000-0000-0000-000000000005', 'cccccccc-0000-0000-0000-000000000010', 'FRIDAY', '14:00:00', '16:00:00', '2026-10-14T14:10:57.133147+00:00', '2026-10-14T14:10:57.133147+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: enrollments (65 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO enrollments (id, tenant_id, offering_id, student_id, status, enrolled_at, created_at, updated_at) VALUES
+  ('574e3ab9-02be-47ea-91a4-357fc432d00e', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000001', 'ENROLLED', '2026-10-14T14:10:57.328187+00:00', '2026-10-14T14:10:57.328189+00:00', '2026-10-14T14:10:57.328189+00:00'),
+  ('dc2a3ba0-52c0-4738-9773-ab071e8bc0ac', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000001', 'ENROLLED', '2026-10-14T14:10:57.328192+00:00', '2026-10-14T14:10:57.328193+00:00', '2026-10-14T14:10:57.328194+00:00'),
+  ('bd81842c-7705-4bb8-81ae-734430fa4881', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000002', 'ENROLLED', '2026-10-14T14:10:57.328196+00:00', '2026-10-14T14:10:57.328196+00:00', '2026-10-14T14:10:57.328197+00:00'),
+  ('487cd218-1936-4ee6-b026-77e5f0b55223', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000002', 'ENROLLED', '2026-10-14T14:10:57.328199+00:00', '2026-10-14T14:10:57.328199+00:00', '2026-10-14T14:10:57.328199+00:00'),
+  ('61d45065-e3b9-4b67-bd89-5157953cd3de', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000003', 'ENROLLED', '2026-10-14T14:10:57.328201+00:00', '2026-10-14T14:10:57.328202+00:00', '2026-10-14T14:10:57.328202+00:00'),
+  ('32d4eb30-482c-40c7-b895-52d1daa8bdc2', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000003', 'ENROLLED', '2026-10-14T14:10:57.328204+00:00', '2026-10-14T14:10:57.328204+00:00', '2026-10-14T14:10:57.328204+00:00'),
+  ('208ddfa7-f7e8-4d79-965e-a7d6c7d32a14', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000004', 'ENROLLED', '2026-10-14T14:10:57.328206+00:00', '2026-10-14T14:10:57.328206+00:00', '2026-10-14T14:10:57.328207+00:00'),
+  ('a5fef75d-f30b-42af-b86e-22fcd780c09b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000004', 'ENROLLED', '2026-10-14T14:10:57.328208+00:00', '2026-10-14T14:10:57.328209+00:00', '2026-10-14T14:10:57.328209+00:00'),
+  ('b12e7e51-8161-42d1-8747-000552fbeaed', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000005', 'ENROLLED', '2026-10-14T14:10:57.328211+00:00', '2026-10-14T14:10:57.328211+00:00', '2026-10-14T14:10:57.328211+00:00'),
+  ('56d0eee7-11b3-4354-b1d3-1c676a18867d', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000005', 'ENROLLED', '2026-10-14T14:10:57.328213+00:00', '2026-10-14T14:10:57.328213+00:00', '2026-10-14T14:10:57.328214+00:00'),
+  ('46bf9d0b-4e0a-4b4a-83b9-21a78af2aec8', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000006', 'ENROLLED', '2026-10-14T14:10:57.328215+00:00', '2026-10-14T14:10:57.328215+00:00', '2026-10-14T14:10:57.328216+00:00'),
+  ('442ad6fd-11da-4a10-93a6-1a3cecb9bf02', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000006', 'ENROLLED', '2026-10-14T14:10:57.328217+00:00', '2026-10-14T14:10:57.328218+00:00', '2026-10-14T14:10:57.328218+00:00'),
+  ('ff1de66e-9482-4d9b-ae3f-7d8cbc6b274a', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000007', 'ENROLLED', '2026-10-14T14:10:57.328220+00:00', '2026-10-14T14:10:57.328220+00:00', '2026-10-14T14:10:57.328220+00:00'),
+  ('34fe229e-5db7-43dc-a046-cd4a831dc6aa', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000007', 'ENROLLED', '2026-10-14T14:10:57.328222+00:00', '2026-10-14T14:10:57.328223+00:00', '2026-10-14T14:10:57.328223+00:00'),
+  ('468d55a4-1027-4323-8ee9-5567a9bbd9f2', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000008', 'ENROLLED', '2026-10-14T14:10:57.328225+00:00', '2026-10-14T14:10:57.328225+00:00', '2026-10-14T14:10:57.328226+00:00'),
+  ('a43908ca-26b5-4107-9e59-35cca5376453', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000008', 'ENROLLED', '2026-10-14T14:10:57.328227+00:00', '2026-10-14T14:10:57.328227+00:00', '2026-10-14T14:10:57.328228+00:00'),
+  ('a3e396e0-b7ff-457f-b235-fb3a28cdc909', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000009', 'ENROLLED', '2026-10-14T14:10:57.328229+00:00', '2026-10-14T14:10:57.328230+00:00', '2026-10-14T14:10:57.328230+00:00'),
+  ('9aa20bf5-475d-4e00-87cd-47e5b1971ef3', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000009', 'ENROLLED', '2026-10-14T14:10:57.328231+00:00', '2026-10-14T14:10:57.328232+00:00', '2026-10-14T14:10:57.328232+00:00'),
+  ('1a675f04-7f8f-4ae9-b9fb-1f931267fcb3', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000010', 'ENROLLED', '2026-10-14T14:10:57.328233+00:00', '2026-10-14T14:10:57.328234+00:00', '2026-10-14T14:10:57.328234+00:00'),
+  ('6c43159b-5a90-43c3-bdba-21c303c0749d', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000010', 'ENROLLED', '2026-10-14T14:10:57.328235+00:00', '2026-10-14T14:10:57.328236+00:00', '2026-10-14T14:10:57.328236+00:00'),
+  ('e7aaecd6-f562-4c58-91dc-f565f1e8f791', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000011', 'ENROLLED', '2026-10-14T14:10:57.328237+00:00', '2026-10-14T14:10:57.328238+00:00', '2026-10-14T14:10:57.328238+00:00'),
+  ('a9df44e1-dbb3-47ee-9b89-0de61b0c28ca', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000011', 'ENROLLED', '2026-10-14T14:10:57.328239+00:00', '2026-10-14T14:10:57.328240+00:00', '2026-10-14T14:10:57.328240+00:00'),
+  ('31980818-d561-4fb4-9c4e-ac1c43f667d4', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000012', 'ENROLLED', '2026-10-14T14:10:57.328241+00:00', '2026-10-14T14:10:57.328242+00:00', '2026-10-14T14:10:57.328242+00:00'),
+  ('fe358bc8-c738-484c-9edf-2254395cb646', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000012', 'ENROLLED', '2026-10-14T14:10:57.328243+00:00', '2026-10-14T14:10:57.328244+00:00', '2026-10-14T14:10:57.328244+00:00'),
+  ('1b786583-ce7e-495f-add0-5f679eced4c2', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000013', 'ENROLLED', '2026-10-14T14:10:57.328245+00:00', '2026-10-14T14:10:57.328246+00:00', '2026-10-14T14:10:57.328246+00:00'),
+  ('48f36251-a781-4909-8108-1b1435dd191d', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000013', 'ENROLLED', '2026-10-14T14:10:57.328247+00:00', '2026-10-14T14:10:57.328248+00:00', '2026-10-14T14:10:57.328248+00:00'),
+  ('3c22508f-1391-41d9-9135-fac58db98bfe', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000014', 'ENROLLED', '2026-10-14T14:10:57.328249+00:00', '2026-10-14T14:10:57.328250+00:00', '2026-10-14T14:10:57.328250+00:00'),
+  ('76df2978-dc4a-4989-a075-ca84c8ea44c3', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000014', 'ENROLLED', '2026-10-14T14:10:57.328251+00:00', '2026-10-14T14:10:57.328252+00:00', '2026-10-14T14:10:57.328252+00:00'),
+  ('21c54d7b-c8b5-4b5f-bc56-1155afba34f7', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000015', 'ENROLLED', '2026-10-14T14:10:57.328253+00:00', '2026-10-14T14:10:57.328254+00:00', '2026-10-14T14:10:57.328254+00:00'),
+  ('f3208859-cfb3-4c6e-a12f-6be01587fde3', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000015', 'ENROLLED', '2026-10-14T14:10:57.328255+00:00', '2026-10-14T14:10:57.328256+00:00', '2026-10-14T14:10:57.328256+00:00'),
+  ('b3e263b9-f33b-484a-9858-e05ab4bef732', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000016', 'ENROLLED', '2026-10-14T14:10:57.328257+00:00', '2026-10-14T14:10:57.328258+00:00', '2026-10-14T14:10:57.328258+00:00'),
+  ('8dc7e0a3-de3e-40b3-9ac6-e0787aeab1c8', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000017', 'ENROLLED', '2026-10-14T14:10:57.328259+00:00', '2026-10-14T14:10:57.328260+00:00', '2026-10-14T14:10:57.328260+00:00'),
+  ('18307552-7653-4c9b-b5d7-cd4f2e77c422', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000018', 'ENROLLED', '2026-10-14T14:10:57.328263+00:00', '2026-10-14T14:10:57.328263+00:00', '2026-10-14T14:10:57.328264+00:00'),
+  ('823ab14e-69ca-49f2-9b77-1d860ea6a608', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000019', 'ENROLLED', '2026-10-14T14:10:57.328265+00:00', '2026-10-14T14:10:57.328265+00:00', '2026-10-14T14:10:57.328266+00:00'),
+  ('26192591-f768-40c6-bf7b-c946cc2fcfe6', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000020', 'ENROLLED', '2026-10-14T14:10:57.328267+00:00', '2026-10-14T14:10:57.328267+00:00', '2026-10-14T14:10:57.328268+00:00'),
+  ('2b7d543c-ad4f-47e8-9605-fefebd8bcf91', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000021', 'ENROLLED', '2026-10-14T14:10:57.328269+00:00', '2026-10-14T14:10:57.328269+00:00', '2026-10-14T14:10:57.328270+00:00'),
+  ('86c9f9b1-8bb5-4406-823c-416227f1bff7', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000022', 'ENROLLED', '2026-10-14T14:10:57.328271+00:00', '2026-10-14T14:10:57.328271+00:00', '2026-10-14T14:10:57.328271+00:00'),
+  ('a6caad5b-c402-4a9b-b9d1-a2cf4c0e5259', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000023', 'ENROLLED', '2026-10-14T14:10:57.328273+00:00', '2026-10-14T14:10:57.328273+00:00', '2026-10-14T14:10:57.328273+00:00'),
+  ('d6a4dda5-1694-4090-a2d9-e19895334eae', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000024', 'ENROLLED', '2026-10-14T14:10:57.328275+00:00', '2026-10-14T14:10:57.328275+00:00', '2026-10-14T14:10:57.328275+00:00'),
+  ('be522007-c88f-42c2-9b1d-fe87a7e8fbc0', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000025', 'ENROLLED', '2026-10-14T14:10:57.328277+00:00', '2026-10-14T14:10:57.328277+00:00', '2026-10-14T14:10:57.328277+00:00'),
+  ('2c917e8a-ba82-4ee4-b34a-29b0507e34bd', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000026', 'ENROLLED', '2026-10-14T14:10:57.328279+00:00', '2026-10-14T14:10:57.328279+00:00', '2026-10-14T14:10:57.328279+00:00'),
+  ('7f21f6e2-b223-4add-aed4-e5c3bf9c2c5c', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000027', 'ENROLLED', '2026-10-14T14:10:57.328281+00:00', '2026-10-14T14:10:57.328281+00:00', '2026-10-14T14:10:57.328281+00:00'),
+  ('849248c9-9649-461a-be2f-ca3681c21511', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000028', 'ENROLLED', '2026-10-14T14:10:57.328283+00:00', '2026-10-14T14:10:57.328283+00:00', '2026-10-14T14:10:57.328284+00:00'),
+  ('81ed3c9e-ed0d-406f-adfd-e0f39fc0aae6', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000029', 'ENROLLED', '2026-10-14T14:10:57.328285+00:00', '2026-10-14T14:10:57.328285+00:00', '2026-10-14T14:10:57.328286+00:00'),
+  ('af1a1c01-783d-45bb-ad84-ceb9c10bbdd2', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000030', 'ENROLLED', '2026-10-14T14:10:57.328287+00:00', '2026-10-14T14:10:57.328288+00:00', '2026-10-14T14:10:57.328288+00:00'),
+  ('886d8913-190b-4054-82b4-615762ac5a44', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000031', 'ENROLLED', '2026-10-14T14:10:57.328289+00:00', '2026-10-14T14:10:57.328290+00:00', '2026-10-14T14:10:57.328290+00:00'),
+  ('8ed2ee60-036b-4019-bed1-5386b6a413e0', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000032', 'ENROLLED', '2026-10-14T14:10:57.328291+00:00', '2026-10-14T14:10:57.328292+00:00', '2026-10-14T14:10:57.328292+00:00'),
+  ('6b16a15b-456e-40cc-9a50-cf85d173ed9b', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000033', 'ENROLLED', '2026-10-14T14:10:57.328293+00:00', '2026-10-14T14:10:57.328294+00:00', '2026-10-14T14:10:57.328294+00:00'),
+  ('035b2486-8c57-4cdd-8d22-7e1d3e48bed6', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000034', 'ENROLLED', '2026-10-14T14:10:57.328295+00:00', '2026-10-14T14:10:57.328296+00:00', '2026-10-14T14:10:57.328296+00:00'),
+  ('2a6613bc-cba2-4291-848b-18e12df140ff', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000035', 'ENROLLED', '2026-10-14T14:10:57.328297+00:00', '2026-10-14T14:10:57.328298+00:00', '2026-10-14T14:10:57.328298+00:00'),
+  ('bb1226c1-ae64-48d9-8b70-28d90c12c811', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000036', 'ENROLLED', '2026-10-14T14:10:57.328300+00:00', '2026-10-14T14:10:57.328300+00:00', '2026-10-14T14:10:57.328300+00:00'),
+  ('43926d63-44a9-4484-aa2d-8fa4a3da8bc6', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000037', 'ENROLLED', '2026-10-14T14:10:57.328301+00:00', '2026-10-14T14:10:57.328302+00:00', '2026-10-14T14:10:57.328302+00:00'),
+  ('c9cf4c3c-d19a-4aec-b47f-45f3b5179c8d', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000038', 'ENROLLED', '2026-10-14T14:10:57.328303+00:00', '2026-10-14T14:10:57.328304+00:00', '2026-10-14T14:10:57.328304+00:00'),
+  ('10572e5d-c1d3-42d3-8898-804cdda4b697', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000039', 'ENROLLED', '2026-10-14T14:10:57.328305+00:00', '2026-10-14T14:10:57.328306+00:00', '2026-10-14T14:10:57.328307+00:00'),
+  ('425ca4bf-f2ef-4a7a-bfcf-67f0f2a912d0', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000040', 'ENROLLED', '2026-10-14T14:10:57.328309+00:00', '2026-10-14T14:10:57.328309+00:00', '2026-10-14T14:10:57.328310+00:00'),
+  ('2edfaa86-2249-4d41-be34-c763c1537bd4', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000041', 'ENROLLED', '2026-10-14T14:10:57.328311+00:00', '2026-10-14T14:10:57.328311+00:00', '2026-10-14T14:10:57.328311+00:00'),
+  ('d1df95c5-1c97-4c8d-9d91-1ac3c89b475d', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000042', 'ENROLLED', '2026-10-14T14:10:57.328313+00:00', '2026-10-14T14:10:57.328313+00:00', '2026-10-14T14:10:57.328314+00:00'),
+  ('ed2bca60-f675-427e-90bc-6795d96125ed', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000043', 'ENROLLED', '2026-10-14T14:10:57.328315+00:00', '2026-10-14T14:10:57.328315+00:00', '2026-10-14T14:10:57.328316+00:00'),
+  ('962dc23a-0246-43f5-95dc-8adf401084bf', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000044', 'ENROLLED', '2026-10-14T14:10:57.328317+00:00', '2026-10-14T14:10:57.328317+00:00', '2026-10-14T14:10:57.328318+00:00'),
+  ('e51bb478-2a45-428d-9706-0e2575db251a', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000045', 'ENROLLED', '2026-10-14T14:10:57.328320+00:00', '2026-10-14T14:10:57.328321+00:00', '2026-10-14T14:10:57.328321+00:00'),
+  ('14137a9e-3354-41a7-a826-3c6d1b6ed2e5', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000046', 'ENROLLED', '2026-10-14T14:10:57.328322+00:00', '2026-10-14T14:10:57.328323+00:00', '2026-10-14T14:10:57.328323+00:00'),
+  ('0f6fc501-e8fb-4fad-86da-3e47d609a681', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000047', 'ENROLLED', '2026-10-14T14:10:57.328324+00:00', '2026-10-14T14:10:57.328325+00:00', '2026-10-14T14:10:57.328325+00:00'),
+  ('1885fa02-199e-483e-91da-cca7b3669823', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000048', 'ENROLLED', '2026-10-14T14:10:57.328327+00:00', '2026-10-14T14:10:57.328327+00:00', '2026-10-14T14:10:57.328327+00:00'),
+  ('a7b2e03a-f98b-42a9-95f3-ffe36aab8b24', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000049', 'ENROLLED', '2026-10-14T14:10:57.328329+00:00', '2026-10-14T14:10:57.328329+00:00', '2026-10-14T14:10:57.328329+00:00'),
+  ('ecd6d0d7-9d91-4451-a957-5e07533bef4c', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000050', 'ENROLLED', '2026-10-14T14:10:57.328331+00:00', '2026-10-14T14:10:57.328331+00:00', '2026-10-14T14:10:57.328331+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: attendance (390 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO attendance (id, tenant_id, offering_id, student_id, att_date, status, marked_by, remarks, created_at, updated_at) VALUES
+  ('1376c0de-dc66-4ebb-a6f2-b13edecf40c6', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000001', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351571+00:00', '2026-10-14T14:10:57.351574+00:00'),
+  ('63071264-fea9-4ac2-b57e-e68a5955e4a3', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000001', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351577+00:00', '2026-10-14T14:10:57.351578+00:00'),
+  ('bc31188e-06bb-49f1-95eb-761946851df5', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000001', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351580+00:00', '2026-10-14T14:10:57.351580+00:00'),
+  ('12e98005-661a-4a1f-8a8b-774b783dcd30', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000001', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351582+00:00', '2026-10-14T14:10:57.351582+00:00'),
+  ('df8bcee8-31c1-4a36-ac94-66bf991506ee', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000001', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351584+00:00', '2026-10-14T14:10:57.351584+00:00'),
+  ('6f42eaf6-8113-4101-a86e-501ff24b55a1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000001', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351585+00:00', '2026-10-14T14:10:57.351586+00:00'),
+  ('f8678287-ae23-4f44-9efc-00beae9490dd', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000001', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351587+00:00', '2026-10-14T14:10:57.351588+00:00'),
+  ('b1876242-fd01-4479-986c-e79ff92227d2', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000001', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351590+00:00', '2026-10-14T14:10:57.351590+00:00'),
+  ('0b982233-32e2-4a1e-b61a-ee2eb8230a59', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000001', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351592+00:00', '2026-10-14T14:10:57.351592+00:00'),
+  ('6e4bdaa4-ce11-4f8f-8b8e-faa9a5d9202b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000001', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351593+00:00', '2026-10-14T14:10:57.351594+00:00'),
+  ('e09f0023-835f-45f7-93c4-66ffab24e978', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000001', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351597+00:00', '2026-10-14T14:10:57.351597+00:00'),
+  ('420bdbd6-b4cc-4ba0-aad9-af4ac0238e7b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000001', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351598+00:00', '2026-10-14T14:10:57.351599+00:00'),
+  ('af87fa5a-7a84-49c8-b252-d497f93707b4', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000002', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351600+00:00', '2026-10-14T14:10:57.351601+00:00'),
+  ('27f85ec6-7115-4235-8957-ada226df3f1a', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000002', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351602+00:00', '2026-10-14T14:10:57.351602+00:00'),
+  ('289414a9-717c-44bd-be3e-d228df3361ac', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000002', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351604+00:00', '2026-10-14T14:10:57.351604+00:00'),
+  ('6ef5686e-3aa6-49e5-9a6e-7531b01f3ec2', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000002', '2026-09-01', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.351605+00:00', '2026-10-14T14:10:57.351606+00:00'),
+  ('4284f3fd-2b1f-4366-80c6-cb165ce9c6d2', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000002', '2026-09-08', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.351607+00:00', '2026-10-14T14:10:57.351608+00:00'),
+  ('60eb0daf-3392-4de1-b417-4af1728b9ecb', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000002', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351609+00:00', '2026-10-14T14:10:57.351609+00:00'),
+  ('229d2a2d-7805-4b5d-a242-23aa5ec369b3', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000002', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351611+00:00', '2026-10-14T14:10:57.351611+00:00'),
+  ('5de722e3-33bb-4c00-83e7-4d608ff5d1a1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000002', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351613+00:00', '2026-10-14T14:10:57.351613+00:00'),
+  ('38f63588-0d1e-46fb-b80a-3f2d60cb3ae9', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000002', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351615+00:00', '2026-10-14T14:10:57.351615+00:00'),
+  ('9a26d91f-f3cc-4358-a70d-4501ae858b05', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000002', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351616+00:00', '2026-10-14T14:10:57.351617+00:00'),
+  ('e69f9e8b-d5a6-42bb-af2c-503ef41d12f5', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000002', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351618+00:00', '2026-10-14T14:10:57.351618+00:00'),
+  ('b5ced79e-6fe8-4fbe-889a-b5362acd1a92', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000002', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351620+00:00', '2026-10-14T14:10:57.351620+00:00'),
+  ('3e71e9c2-92a8-4e8e-b576-f7aef676f940', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000003', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351621+00:00', '2026-10-14T14:10:57.351621+00:00'),
+  ('e7a2d0e3-1d02-4afa-90e9-e8a839eff931', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000003', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351623+00:00', '2026-10-14T14:10:57.351623+00:00'),
+  ('20ecfa19-e657-468f-8a67-7762291ed63a', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000003', '2026-08-24', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351624+00:00', '2026-10-14T14:10:57.351624+00:00'),
+  ('db26e4a1-76dd-4e37-8925-5712a75598e0', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000003', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351626+00:00', '2026-10-14T14:10:57.351626+00:00'),
+  ('f5d0a365-920b-495c-bad7-0644712a561e', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000003', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351627+00:00', '2026-10-14T14:10:57.351628+00:00'),
+  ('f00e2837-5ea7-4301-931d-a3649792c5eb', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000003', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351629+00:00', '2026-10-14T14:10:57.351629+00:00'),
+  ('3f948d77-a654-40cf-9723-71228dff08ce', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000003', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351630+00:00', '2026-10-14T14:10:57.351631+00:00'),
+  ('0b83492b-d57a-4df1-962e-b8e3e2219435', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000003', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351632+00:00', '2026-10-14T14:10:57.351632+00:00'),
+  ('b1451125-d8e7-440f-8a89-d2a81470e358', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000003', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351634+00:00', '2026-10-14T14:10:57.351634+00:00'),
+  ('db4c7cc6-0c2e-4622-aef1-a1219bb5de4e', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000003', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351635+00:00', '2026-10-14T14:10:57.351636+00:00'),
+  ('317222cc-ac32-432c-a4db-a08d18acaa0c', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000003', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351637+00:00', '2026-10-14T14:10:57.351637+00:00'),
+  ('72b10018-2cbc-4439-9f45-a16a0836777a', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000003', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351638+00:00', '2026-10-14T14:10:57.351639+00:00'),
+  ('6b22b000-c01a-4c8a-a3b0-b792c9bffe1b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000004', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351640+00:00', '2026-10-14T14:10:57.351640+00:00'),
+  ('9dd53942-0618-4727-ac00-9d4a26b6584d', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000004', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351641+00:00', '2026-10-14T14:10:57.351642+00:00'),
+  ('43260f58-59c6-45e4-b72e-7772d0b4d6f1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000004', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351643+00:00', '2026-10-14T14:10:57.351643+00:00'),
+  ('c4b9b396-cae6-4ba5-95fb-c1afdc881877', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000004', '2026-09-01', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351645+00:00', '2026-10-14T14:10:57.351646+00:00'),
+  ('5f724a75-6b95-414c-a59f-07a62840a834', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000004', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351647+00:00', '2026-10-14T14:10:57.351647+00:00'),
+  ('8364fae6-5a25-42da-8547-61136b087094', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000004', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351649+00:00', '2026-10-14T14:10:57.351649+00:00'),
+  ('9aa3e22b-54a3-4ce9-b155-de006fa0ce23', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000004', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351651+00:00', '2026-10-14T14:10:57.351652+00:00'),
+  ('26c9e1e4-77a8-4565-a3ed-ac060340c7c5', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000004', '2026-08-17', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.351653+00:00', '2026-10-14T14:10:57.351653+00:00'),
+  ('4bc4023d-656d-4c74-b8d6-f2f8324ee915', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000004', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351655+00:00', '2026-10-14T14:10:57.351655+00:00'),
+  ('6e9576e0-3b91-4f6d-b6fc-8a881a3feb91', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000004', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351656+00:00', '2026-10-14T14:10:57.351656+00:00'),
+  ('1ddbd5b6-55ba-4749-8c1b-026dfbab88d1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000004', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351658+00:00', '2026-10-14T14:10:57.351658+00:00'),
+  ('d77fb916-d4e0-4d1b-be3e-ceb23b2d7351', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000004', '2026-09-15', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351659+00:00', '2026-10-14T14:10:57.351660+00:00'),
+  ('ed46a81d-8d13-44a4-ae66-bdd0862ec3ca', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000005', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351661+00:00', '2026-10-14T14:10:57.351661+00:00'),
+  ('1b452317-c580-45cd-9ded-290f77b492db', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000005', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351663+00:00', '2026-10-14T14:10:57.351663+00:00'),
+  ('493bed50-3246-4299-a62c-e0463d2c350f', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000005', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351664+00:00', '2026-10-14T14:10:57.351664+00:00'),
+  ('a58cbe64-9d1b-4926-9922-232473a9f732', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000005', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351666+00:00', '2026-10-14T14:10:57.351666+00:00'),
+  ('21f1ce49-c10d-461d-98aa-b9d83c2dea7d', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000005', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351667+00:00', '2026-10-14T14:10:57.351667+00:00'),
+  ('2080b3fa-05d2-446b-bc57-4f9e64e973ce', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000005', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351669+00:00', '2026-10-14T14:10:57.351669+00:00'),
+  ('16deb17e-35d2-4ded-9f1c-fd1326043972', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000005', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351670+00:00', '2026-10-14T14:10:57.351671+00:00'),
+  ('5495f189-9db3-4e22-8d9a-38544b2774be', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000005', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351672+00:00', '2026-10-14T14:10:57.351672+00:00'),
+  ('9df4ac4d-306b-4baf-9862-094fa327042f', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000005', '2026-08-24', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351674+00:00', '2026-10-14T14:10:57.351674+00:00'),
+  ('106154fe-9650-41a7-b776-245e7e96bed1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000005', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351675+00:00', '2026-10-14T14:10:57.351676+00:00'),
+  ('fc2ba397-0097-440a-a370-5124bf603f93', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000005', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351677+00:00', '2026-10-14T14:10:57.351677+00:00'),
+  ('a19d770d-8edf-4661-83b9-e33cfb333b32', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000005', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351678+00:00', '2026-10-14T14:10:57.351679+00:00'),
+  ('fbc14786-2f3b-45e8-8ff6-962200b95923', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000006', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351680+00:00', '2026-10-14T14:10:57.351681+00:00'),
+  ('76e64e3c-9c86-4333-bdc3-9eb5f74e0b96', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000006', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351682+00:00', '2026-10-14T14:10:57.351682+00:00'),
+  ('02d15620-260d-4e48-a199-b5fc3f77dcf1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000006', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351683+00:00', '2026-10-14T14:10:57.351684+00:00'),
+  ('7463ef57-0bf7-4990-b5e3-f697631c19e1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000006', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351685+00:00', '2026-10-14T14:10:57.351685+00:00'),
+  ('d6b24c2e-6ac2-4669-9f11-2955f1e14412', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000006', '2026-09-08', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351687+00:00', '2026-10-14T14:10:57.351687+00:00'),
+  ('7e7dfeb0-aa2b-4390-9b58-44aeb526f3c2', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000006', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351688+00:00', '2026-10-14T14:10:57.351688+00:00'),
+  ('fda6a905-79cd-4dfc-9e70-998ea6d32394', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000006', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351690+00:00', '2026-10-14T14:10:57.351690+00:00'),
+  ('e4fd190e-c616-4cb6-9490-5aa9f8204c70', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000006', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351691+00:00', '2026-10-14T14:10:57.351692+00:00'),
+  ('623ccf33-00d4-4db9-9571-e02571119755', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000006', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351693+00:00', '2026-10-14T14:10:57.351693+00:00'),
+  ('90ed8ee8-86b6-4a21-b67b-34b6e0783e1d', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000006', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351694+00:00', '2026-10-14T14:10:57.351695+00:00'),
+  ('4566554d-08eb-4d7c-a555-8ad13483542f', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000006', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351696+00:00', '2026-10-14T14:10:57.351696+00:00'),
+  ('eb5667d6-2503-4fdc-94e8-bc23742eb540', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000006', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351698+00:00', '2026-10-14T14:10:57.351698+00:00'),
+  ('4142c7bd-5d7c-401f-bf37-f911c782e56f', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000007', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351699+00:00', '2026-10-14T14:10:57.351699+00:00'),
+  ('5188239b-7983-422d-bd40-55ad17c8c8db', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000007', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351702+00:00', '2026-10-14T14:10:57.351702+00:00'),
+  ('e12900c4-d05d-4f02-975d-05b10b9234b5', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000007', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351703+00:00', '2026-10-14T14:10:57.351704+00:00'),
+  ('c81e02d9-6ffa-43a5-abb9-b49bc9804729', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000007', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351705+00:00', '2026-10-14T14:10:57.351705+00:00'),
+  ('711701c3-62fc-4c4d-90a8-45387e49a7e2', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000007', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351707+00:00', '2026-10-14T14:10:57.351707+00:00'),
+  ('8937de90-99d6-4a28-b263-a0e43db577b1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000007', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351708+00:00', '2026-10-14T14:10:57.351709+00:00'),
+  ('dba997aa-3cb1-4823-b0ba-bcb5283d47b4', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000007', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351710+00:00', '2026-10-14T14:10:57.351710+00:00'),
+  ('fcd7bfa7-084d-47d5-81e8-fff1adbba662', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000007', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351711+00:00', '2026-10-14T14:10:57.351712+00:00'),
+  ('77b6d819-bc6c-40b2-aa2e-c8f5b44acd07', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000007', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351713+00:00', '2026-10-14T14:10:57.351713+00:00'),
+  ('5846ee63-ca4e-44b2-8021-60f099b9599b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000007', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351714+00:00', '2026-10-14T14:10:57.351715+00:00'),
+  ('51e075bb-d66f-4737-a21f-fdba172de676', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000007', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351716+00:00', '2026-10-14T14:10:57.351716+00:00'),
+  ('333330ec-145f-46a7-877f-51395b3650fd', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000007', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351718+00:00', '2026-10-14T14:10:57.351718+00:00'),
+  ('3d8f633b-943c-4b85-adbe-4d93544194ee', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000008', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351719+00:00', '2026-10-14T14:10:57.351719+00:00'),
+  ('461f10c9-59fb-4762-b14f-5836c8f21b53', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000008', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351721+00:00', '2026-10-14T14:10:57.351721+00:00'),
+  ('a8d64cab-007b-402e-90e4-b5f680043b82', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000008', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351722+00:00', '2026-10-14T14:10:57.351722+00:00'),
+  ('ab2db488-e791-4aa4-ad5a-0f0dc5da748f', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000008', '2026-09-01', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351724+00:00', '2026-10-14T14:10:57.351724+00:00'),
+  ('1ff45e04-0a8b-49a0-bf87-003ae692f04d', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000008', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351725+00:00', '2026-10-14T14:10:57.351726+00:00'),
+  ('460e49f4-ac71-491c-bc08-fe7dc31f0d50', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000008', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351727+00:00', '2026-10-14T14:10:57.351727+00:00'),
+  ('f509342c-ab89-4056-b30f-a3866dd15e65', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000008', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351728+00:00', '2026-10-14T14:10:57.351729+00:00'),
+  ('28e89a10-e890-471c-8394-95b9f9690e6f', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000008', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351730+00:00', '2026-10-14T14:10:57.351730+00:00'),
+  ('b531c277-1814-413e-aee6-bffbc0a15a34', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000008', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351732+00:00', '2026-10-14T14:10:57.351732+00:00'),
+  ('e921d070-048e-4aeb-8c4d-ac8089de5ac6', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000008', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351734+00:00', '2026-10-14T14:10:57.351735+00:00'),
+  ('d5bc8c18-f1c9-4a61-bfad-1d78778a43bd', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000008', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351736+00:00', '2026-10-14T14:10:57.351736+00:00'),
+  ('b750f693-d5e3-487b-86ba-c0a354414850', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000008', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351738+00:00', '2026-10-14T14:10:57.351738+00:00'),
+  ('d175e608-3bd5-43a5-ad15-e029f1cb5b37', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000009', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351739+00:00', '2026-10-14T14:10:57.351740+00:00'),
+  ('0754cf7c-17e9-4122-acb7-ecda8244106b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000009', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351741+00:00', '2026-10-14T14:10:57.351741+00:00'),
+  ('c820856d-a3f3-40e1-8e1d-1d3f1103fde0', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000009', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351742+00:00', '2026-10-14T14:10:57.351743+00:00'),
+  ('fdd73894-bab4-4c51-bf69-40fe65948f01', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000009', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351744+00:00', '2026-10-14T14:10:57.351744+00:00'),
+  ('07a4c905-25b5-4d6d-8075-493b00fa1c6d', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000009', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351745+00:00', '2026-10-14T14:10:57.351746+00:00'),
+  ('0569fb68-b94d-4aec-866d-004c1756e235', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000009', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351747+00:00', '2026-10-14T14:10:57.351747+00:00'),
+  ('b41efb8a-8b0a-4ee9-b3e7-e471a3e24cbe', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000009', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351748+00:00', '2026-10-14T14:10:57.351749+00:00'),
+  ('49005e88-bec1-48c6-933b-ce3291fa67f6', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000009', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351750+00:00', '2026-10-14T14:10:57.351750+00:00'),
+  ('ee37b015-0902-4a8c-855a-45e5bb3e18d6', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000009', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351752+00:00', '2026-10-14T14:10:57.351752+00:00'),
+  ('09fc837b-bee9-4315-af10-a1749515fc62', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000009', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351753+00:00', '2026-10-14T14:10:57.351753+00:00'),
+  ('99a231b1-313f-4952-8154-f531853f41bb', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000009', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351755+00:00', '2026-10-14T14:10:57.351755+00:00'),
+  ('4ba88b26-dcfe-4d09-ab18-eacaa375c47b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000009', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351756+00:00', '2026-10-14T14:10:57.351757+00:00'),
+  ('60f708e0-8189-4a90-9d5f-195e2b3dcf4b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000010', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351758+00:00', '2026-10-14T14:10:57.351758+00:00'),
+  ('3480f500-5cba-4f5e-ade0-8828283f0870', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000010', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351759+00:00', '2026-10-14T14:10:57.351760+00:00'),
+  ('e2e20f3f-e635-4846-abd5-02b407ce9791', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000010', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351761+00:00', '2026-10-14T14:10:57.351761+00:00'),
+  ('206c2057-3117-4289-80fc-630df13ac605', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000010', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351763+00:00', '2026-10-14T14:10:57.351763+00:00'),
+  ('63461bbe-1e00-4357-8022-4b1335ad7330', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000010', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351764+00:00', '2026-10-14T14:10:57.351764+00:00'),
+  ('a6682e4a-52a3-4c61-ae70-b5582c6376d4', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000010', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351766+00:00', '2026-10-14T14:10:57.351766+00:00'),
+  ('41a9905f-9408-44b6-ab80-1ed34b0f6212', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000010', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351767+00:00', '2026-10-14T14:10:57.351767+00:00'),
+  ('177a03c5-4747-4fad-8133-bfdcbce4b589', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000010', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351769+00:00', '2026-10-14T14:10:57.351769+00:00'),
+  ('a1e879a8-7402-4d9e-b3a9-0338eff49be9', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000010', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351770+00:00', '2026-10-14T14:10:57.351770+00:00'),
+  ('797b7d10-a536-4990-b819-af753a4531e0', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000010', '2026-09-01', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351772+00:00', '2026-10-14T14:10:57.351772+00:00'),
+  ('9c88b4b0-e319-4ca3-a019-360ee494fa71', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000010', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351773+00:00', '2026-10-14T14:10:57.351774+00:00'),
+  ('b8cb73ae-fce7-4b43-9db7-a5acd544f560', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000010', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351775+00:00', '2026-10-14T14:10:57.351775+00:00'),
+  ('02743601-f86f-44ca-8733-049c2cfb97a0', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000011', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351776+00:00', '2026-10-14T14:10:57.351777+00:00'),
+  ('4bc1b843-52e5-4b7b-b923-8a2eaeae0533', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000011', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351780+00:00', '2026-10-14T14:10:57.351780+00:00'),
+  ('65d398ed-62c6-40a6-98d1-7e5fc6cd262c', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000011', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351782+00:00', '2026-10-14T14:10:57.351782+00:00'),
+  ('223b58e9-173c-4b40-b623-09fa0b3560ef', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000011', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351783+00:00', '2026-10-14T14:10:57.351784+00:00'),
+  ('f6996eb2-d88b-411a-a7b8-6467246b8088', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000011', '2026-09-08', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351785+00:00', '2026-10-14T14:10:57.351785+00:00'),
+  ('d14b92ae-9455-4d51-a2d3-8be3c4760512', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000011', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351786+00:00', '2026-10-14T14:10:57.351787+00:00'),
+  ('966d12e2-369c-4b7f-b48f-b8e929871480', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000011', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351788+00:00', '2026-10-14T14:10:57.351788+00:00'),
+  ('2bf5c24e-d727-4c4a-ba9d-56b6eea35791', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000011', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351790+00:00', '2026-10-14T14:10:57.351790+00:00'),
+  ('54d5dde3-51e1-49e3-88f2-4cc8c16578b0', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000011', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351791+00:00', '2026-10-14T14:10:57.351791+00:00'),
+  ('9b17d6b1-a4e0-4f5d-a138-cd98bac86d56', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000011', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351793+00:00', '2026-10-14T14:10:57.351793+00:00'),
+  ('b9dc36b1-0dc0-48dd-8f38-df9fffc401b6', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000011', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351794+00:00', '2026-10-14T14:10:57.351794+00:00'),
+  ('5ca77d8a-22d0-4938-950d-6749ccfac4fa', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000011', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351796+00:00', '2026-10-14T14:10:57.351796+00:00'),
+  ('f4cea879-caa6-4e0d-ad49-b9ef0a08cd57', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000012', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351797+00:00', '2026-10-14T14:10:57.351797+00:00'),
+  ('dd7ccaad-4e8a-4396-b0f6-fb3fbed058a5', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000012', '2026-08-17', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351799+00:00', '2026-10-14T14:10:57.351799+00:00'),
+  ('17b3d9df-a84b-4f32-b5d2-6863d1cd7d06', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000012', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351800+00:00', '2026-10-14T14:10:57.351800+00:00'),
+  ('06d55a0d-1af9-4c72-973e-d6b8bac4cee0', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000012', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351802+00:00', '2026-10-14T14:10:57.351802+00:00'),
+  ('ede6fa06-7a53-4d4d-aacf-fb6218b752a7', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000012', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351803+00:00', '2026-10-14T14:10:57.351804+00:00'),
+  ('4f686c46-5ebe-4220-b77f-3b1cc7ab8064', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000012', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351806+00:00', '2026-10-14T14:10:57.351806+00:00'),
+  ('4e2ddf8d-9f2f-4777-b6ff-a5fc744ce325', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000012', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351807+00:00', '2026-10-14T14:10:57.351808+00:00'),
+  ('145e668d-5a99-4b8a-92a8-51c088bc0ba1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000012', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351809+00:00', '2026-10-14T14:10:57.351809+00:00'),
+  ('01b99aa6-b7d1-4532-9dde-56c9c3b2b6ee', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000012', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351810+00:00', '2026-10-14T14:10:57.351811+00:00'),
+  ('79ad753b-e983-4ac6-b6af-b68ba70590a8', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000012', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351812+00:00', '2026-10-14T14:10:57.351812+00:00'),
+  ('0e9de912-49d8-4361-8374-28df443b3a06', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000012', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351813+00:00', '2026-10-14T14:10:57.351814+00:00'),
+  ('4ffa0ad9-f8d7-4bef-bc96-7a6362a7eeef', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000012', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351815+00:00', '2026-10-14T14:10:57.351815+00:00'),
+  ('5529345f-28e0-4b74-a6ca-029970ba3872', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000013', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351817+00:00', '2026-10-14T14:10:57.351817+00:00'),
+  ('071e4234-ce86-4155-a435-c4342e443f57', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000013', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351818+00:00', '2026-10-14T14:10:57.351818+00:00'),
+  ('0157c0a7-d021-468c-b84b-7b097b19fdb7', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000013', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351820+00:00', '2026-10-14T14:10:57.351820+00:00'),
+  ('ad67a947-71d1-4f8f-855e-65990d3076ed', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000013', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351821+00:00', '2026-10-14T14:10:57.351822+00:00'),
+  ('4dfdfbb4-051e-4f79-bf2c-0c4a79a942f8', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000013', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351823+00:00', '2026-10-14T14:10:57.351823+00:00'),
+  ('44d92269-7213-48f8-a5e8-e587af90a432', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000013', '2026-09-15', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.351825+00:00', '2026-10-14T14:10:57.351826+00:00'),
+  ('fb150980-93e5-43e5-938e-a853bf610bcf', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000013', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351827+00:00', '2026-10-14T14:10:57.351827+00:00'),
+  ('ac5649ca-f271-412e-9bc1-033a975ea1cc', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000013', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351829+00:00', '2026-10-14T14:10:57.351829+00:00'),
+  ('ddc8a682-0fcc-4e03-9674-bf318774f928', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000013', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351830+00:00', '2026-10-14T14:10:57.351831+00:00'),
+  ('ecd8a693-62d4-4c54-9f4c-7f62934b58d8', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000013', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351832+00:00', '2026-10-14T14:10:57.351832+00:00'),
+  ('70f31861-9b0b-4030-b225-77ab9542dab1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000013', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351833+00:00', '2026-10-14T14:10:57.351834+00:00'),
+  ('0375b236-6a82-405a-8249-ec07f19fae51', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000013', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351835+00:00', '2026-10-14T14:10:57.351835+00:00'),
+  ('3b468cbd-6205-4dde-bd9f-9f576bc84a31', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000014', '2026-08-10', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.351836+00:00', '2026-10-14T14:10:57.351837+00:00'),
+  ('2e0fe1d4-4591-461c-9a2d-bf05ced1e967', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000014', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351838+00:00', '2026-10-14T14:10:57.351838+00:00'),
+  ('368b1f1b-602e-47fa-aaba-5eb0faa3c6d8', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000014', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351839+00:00', '2026-10-14T14:10:57.351840+00:00'),
+  ('34aeb43c-7210-4ab9-bb2e-48bc02841cea', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000014', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351841+00:00', '2026-10-14T14:10:57.351841+00:00'),
+  ('b8d269c6-86c4-4e66-b84e-2d7b07896bb1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000014', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351843+00:00', '2026-10-14T14:10:57.351843+00:00'),
+  ('2f63537f-6618-4f9c-b843-5eeecb0f9f80', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000014', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351844+00:00', '2026-10-14T14:10:57.351844+00:00'),
+  ('9cbc7d8f-26a5-461e-9f41-f24eb8ef38c4', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000014', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351846+00:00', '2026-10-14T14:10:57.351846+00:00'),
+  ('7ebd5c4c-05a7-428e-9389-b19859fba5ef', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000014', '2026-08-17', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351847+00:00', '2026-10-14T14:10:57.351847+00:00'),
+  ('25fca3b2-bbf2-4655-8a2b-2cecf7998a5a', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000014', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351849+00:00', '2026-10-14T14:10:57.351849+00:00'),
+  ('4ecfaa0f-2942-4f7a-8bb6-67b951c7a029', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000014', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351850+00:00', '2026-10-14T14:10:57.351851+00:00'),
+  ('b12e0de6-5821-4fde-bfb6-e06273ee806b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000014', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351852+00:00', '2026-10-14T14:10:57.351852+00:00'),
+  ('dacd45e3-485e-41e4-b8d9-357842a91883', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000014', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351853+00:00', '2026-10-14T14:10:57.351854+00:00'),
+  ('7a050296-9fc5-45d9-9944-c00a6dd44ca1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000015', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351855+00:00', '2026-10-14T14:10:57.351855+00:00'),
+  ('0d8dca08-6248-4e0f-af7b-da6112825dc1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000015', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351857+00:00', '2026-10-14T14:10:57.351857+00:00'),
+  ('ace4e9d5-fcb5-4674-b5b4-29ec3a88bba1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000015', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351858+00:00', '2026-10-14T14:10:57.351859+00:00'),
+  ('9196f006-88e1-402e-9272-7bb972cc8380', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000015', '2026-09-01', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.351860+00:00', '2026-10-14T14:10:57.351860+00:00'),
+  ('fb9353be-4a48-41d8-a300-95275589a7c2', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000015', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351861+00:00', '2026-10-14T14:10:57.351862+00:00'),
+  ('81869906-785b-4847-ad19-2d412782b296', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000015', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351863+00:00', '2026-10-14T14:10:57.351863+00:00'),
+  ('1d5597a6-e04b-48c4-b080-12c83206d178', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000015', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351864+00:00', '2026-10-14T14:10:57.351865+00:00'),
+  ('d4df1a1d-4f7b-4b3a-acc6-e278bb80c2d7', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000015', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351866+00:00', '2026-10-14T14:10:57.351866+00:00'),
+  ('8790a0d3-b3c6-48a6-8fd5-97f00802ccfb', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000015', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351868+00:00', '2026-10-14T14:10:57.351868+00:00'),
+  ('7ee2a5b6-b368-43b4-8558-ae28cce2e955', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000015', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351869+00:00', '2026-10-14T14:10:57.351869+00:00'),
+  ('316fd402-2683-45f2-b405-efc8b28b2dd6', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000015', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351872+00:00', '2026-10-14T14:10:57.351872+00:00'),
+  ('47e50aa7-5227-406e-bfa0-dd65316589ad', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000015', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351873+00:00', '2026-10-14T14:10:57.351874+00:00'),
+  ('58ad7683-1bf8-46af-8944-4c14ed006a9b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000016', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351875+00:00', '2026-10-14T14:10:57.351875+00:00'),
+  ('838d5787-7243-45aa-9f95-6440fcb05a34', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000016', '2026-08-17', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351876+00:00', '2026-10-14T14:10:57.351877+00:00'),
+  ('c483ebd8-ff54-4f79-815c-52ad12170970', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000016', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351878+00:00', '2026-10-14T14:10:57.351878+00:00'),
+  ('688f9e7f-ff90-4cd8-a2d5-6cb03af5e351', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000016', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351880+00:00', '2026-10-14T14:10:57.351880+00:00'),
+  ('ea430315-ff44-43ff-bb16-98b142b1be37', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000016', '2026-09-08', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351881+00:00', '2026-10-14T14:10:57.351881+00:00'),
+  ('1cf3480a-2e55-4817-aeee-ac0e8baa4ab4', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000016', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351883+00:00', '2026-10-14T14:10:57.351883+00:00'),
+  ('d4b64fc1-699c-4a29-a121-815c10ae7ad9', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000017', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351884+00:00', '2026-10-14T14:10:57.351885+00:00'),
+  ('3842a2e6-2a41-4a5f-b23f-17953e016e38', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000017', '2026-08-17', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351886+00:00', '2026-10-14T14:10:57.351886+00:00'),
+  ('8101ac55-f670-40c2-9c76-f27e78cac7bb', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000017', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351887+00:00', '2026-10-14T14:10:57.351888+00:00'),
+  ('59898904-4d5f-404f-82f0-ef6dcd6e1821', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000017', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351889+00:00', '2026-10-14T14:10:57.351889+00:00'),
+  ('877328fa-4c64-49a7-8c0a-9e33b1a1b061', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000017', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351890+00:00', '2026-10-14T14:10:57.351891+00:00'),
+  ('3aefa62d-8978-46b0-a391-4a6fa4909ab8', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000017', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351892+00:00', '2026-10-14T14:10:57.351892+00:00'),
+  ('dcedebe9-f28e-415f-bdc4-75fff99ffaa3', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000018', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351893+00:00', '2026-10-14T14:10:57.351894+00:00'),
+  ('0331c4c7-b023-4bc2-9cb0-375a607eba00', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000018', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351895+00:00', '2026-10-14T14:10:57.351895+00:00'),
+  ('66d92024-6d1f-4cd8-b05d-a7d0e3da9156', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000018', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351896+00:00', '2026-10-14T14:10:57.351897+00:00'),
+  ('82824588-81d1-4dcd-8771-8619326585da', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000018', '2026-09-01', 'LATE', NULL, NULL, '2026-10-14T14:10:57.351898+00:00', '2026-10-14T14:10:57.351898+00:00'),
+  ('adb80e68-1bad-40d8-a8b6-e0c0cb3befd7', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000018', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351899+00:00', '2026-10-14T14:10:57.351900+00:00'),
+  ('c03a5022-a91a-41a3-85c6-cd73118c879b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000018', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351901+00:00', '2026-10-14T14:10:57.351901+00:00'),
+  ('cdf6d59d-2068-42c7-a505-57616c218538', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000019', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351902+00:00', '2026-10-14T14:10:57.351903+00:00'),
+  ('828cd11f-e566-42fe-9744-fa24d05d3911', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000019', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351904+00:00', '2026-10-14T14:10:57.351904+00:00'),
+  ('ab622425-fcd9-4328-b336-be4268429928', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000019', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351906+00:00', '2026-10-14T14:10:57.351906+00:00'),
+  ('ac1c4531-dbaa-4e32-bb3b-3fb18a9a08bb', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000019', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351908+00:00', '2026-10-14T14:10:57.351909+00:00'),
+  ('6f7d78de-743e-4d8a-aa6f-64a64ae72581', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000019', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351910+00:00', '2026-10-14T14:10:57.351910+00:00'),
+  ('1e38c664-48d6-4e81-8007-a5225fd0b68a', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000019', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351911+00:00', '2026-10-14T14:10:57.351912+00:00'),
+  ('3a533adf-086b-42a8-924f-cdd2ba0d962c', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000020', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351913+00:00', '2026-10-14T14:10:57.351913+00:00'),
+  ('450f3d6c-394c-44be-b8cb-332d2aef48aa', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000020', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351914+00:00', '2026-10-14T14:10:57.351915+00:00'),
+  ('9781d5e7-528e-4932-a323-cc290b0e7567', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000020', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351917+00:00', '2026-10-14T14:10:57.351917+00:00'),
+  ('b70f2314-1184-464c-872b-a5a5f6bab053', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000020', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351919+00:00', '2026-10-14T14:10:57.351919+00:00'),
+  ('9a279474-b63a-4a79-b796-1f513074c2a9', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000020', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351920+00:00', '2026-10-14T14:10:57.351920+00:00'),
+  ('ea99aa20-7e37-4c79-8e27-08a1d154bd11', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000020', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351922+00:00', '2026-10-14T14:10:57.351922+00:00'),
+  ('6d8307ba-300a-43f7-8a95-5a869e532298', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000021', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351923+00:00', '2026-10-14T14:10:57.351924+00:00'),
+  ('c33b8883-d7a2-4f46-82c2-fe0e5085daba', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000021', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351925+00:00', '2026-10-14T14:10:57.351925+00:00'),
+  ('192c103a-86ed-4ce8-a83f-98bb42395720', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000021', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351926+00:00', '2026-10-14T14:10:57.351927+00:00'),
+  ('8c5982e1-3045-49ae-a05f-6831c640bc5a', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000021', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351928+00:00', '2026-10-14T14:10:57.351928+00:00'),
+  ('f951e563-3bb1-4d43-8043-31964297a6e7', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000021', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351929+00:00', '2026-10-14T14:10:57.351930+00:00'),
+  ('392ad131-a0ee-4b31-b64a-ac616cfba980', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000003', 'eeeeeeee-1111-0000-0000-000000000021', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351931+00:00', '2026-10-14T14:10:57.351931+00:00'),
+  ('4e5e67e8-ca3a-490b-9be5-9e1822ddca2e', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000022', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351932+00:00', '2026-10-14T14:10:57.351933+00:00'),
+  ('9441b112-0697-49b4-9792-735219089eae', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000022', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351934+00:00', '2026-10-14T14:10:57.351934+00:00'),
+  ('85595a8f-7da6-40e3-bea2-f3aedabbc159', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000022', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351936+00:00', '2026-10-14T14:10:57.351936+00:00'),
+  ('3fba3476-47a6-4441-a753-dcfb5577b279', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000022', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351937+00:00', '2026-10-14T14:10:57.351937+00:00'),
+  ('9150d550-0bf8-4ff6-b800-ff85224c5bf4', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000022', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351938+00:00', '2026-10-14T14:10:57.351939+00:00'),
+  ('5b0c0098-8fc3-491b-93cf-2b1998d15bd8', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000022', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351940+00:00', '2026-10-14T14:10:57.351940+00:00'),
+  ('6b079fb5-b05d-4b03-9fc5-bb56d82d43f9', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000023', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351942+00:00', '2026-10-14T14:10:57.351942+00:00'),
+  ('2d684ff2-e9d1-4275-abda-e6b6b2278dea', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000023', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351943+00:00', '2026-10-14T14:10:57.351944+00:00'),
+  ('7b193b99-8dd4-4ae8-9813-c0695008e50e', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000023', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351945+00:00', '2026-10-14T14:10:57.351945+00:00'),
+  ('2721781a-92c1-4bc9-bf2f-aaf572b07602', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000023', '2026-09-01', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.351946+00:00', '2026-10-14T14:10:57.351947+00:00'),
+  ('2a102251-b6d9-48d8-b4d0-733177432750', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000023', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351948+00:00', '2026-10-14T14:10:57.351948+00:00'),
+  ('8ce9ca91-a24f-4016-9953-75ea89104ee2', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000023', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351949+00:00', '2026-10-14T14:10:57.351950+00:00'),
+  ('6dbc1854-d27e-456e-bf3c-39f034f47ac7', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000024', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351951+00:00', '2026-10-14T14:10:57.351951+00:00'),
+  ('510a4457-8325-4f51-a707-5d02d61b6eaf', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000024', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351952+00:00', '2026-10-14T14:10:57.351953+00:00'),
+  ('67677a06-e004-4092-8fc2-34cca3838539', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000024', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351954+00:00', '2026-10-14T14:10:57.351954+00:00'),
+  ('8261dbd7-df88-4949-b3a0-445daa21f645', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000024', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351956+00:00', '2026-10-14T14:10:57.351956+00:00'),
+  ('5e9bda21-7798-432d-b142-5bef4e2d65c9', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000024', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351957+00:00', '2026-10-14T14:10:57.351957+00:00'),
+  ('06221884-f5d7-4675-a00a-ad6543c6ed16', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000024', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351959+00:00', '2026-10-14T14:10:57.351959+00:00'),
+  ('4efeb11f-e38e-4fc9-92f3-8a76b4c593d1', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000025', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351960+00:00', '2026-10-14T14:10:57.351960+00:00'),
+  ('d04f4f95-48cd-4eb0-a526-9e34768b4f58', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000025', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351963+00:00', '2026-10-14T14:10:57.351963+00:00'),
+  ('d87949ac-9621-41cf-91ac-b28b4da2bef5', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000025', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351965+00:00', '2026-10-14T14:10:57.351965+00:00'),
+  ('3e9977f1-8975-4e44-a053-32dd05222be0', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000025', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351966+00:00', '2026-10-14T14:10:57.351967+00:00'),
+  ('73f5e49f-92a8-4f79-9e7d-7b54885a7e56', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000025', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351968+00:00', '2026-10-14T14:10:57.351968+00:00'),
+  ('52a8150e-59db-4c7d-94de-8d016db1f88b', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000025', '2026-09-15', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.351970+00:00', '2026-10-14T14:10:57.351970+00:00'),
+  ('3e828d5b-d832-40b3-a12d-63a0d7f64ed7', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000026', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351971+00:00', '2026-10-14T14:10:57.351971+00:00'),
+  ('d38149eb-0956-4753-a8a6-1a9700732eaa', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000026', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351973+00:00', '2026-10-14T14:10:57.351973+00:00'),
+  ('ea4c8338-bf53-4b78-a0f9-25b8b6232788', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000026', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351974+00:00', '2026-10-14T14:10:57.351975+00:00'),
+  ('0496cfd4-0dde-42b8-9fe8-b877398b807b', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000026', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351976+00:00', '2026-10-14T14:10:57.351976+00:00'),
+  ('42d99ec8-a81a-4542-9dc7-29d7ae501bec', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000026', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351977+00:00', '2026-10-14T14:10:57.351978+00:00'),
+  ('8b4efa59-7209-40e7-8c2c-6a6b51223c7a', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000026', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351979+00:00', '2026-10-14T14:10:57.351979+00:00'),
+  ('8a0d7bbb-89d8-4ec0-9e27-5a38bd2e61c3', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000027', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351980+00:00', '2026-10-14T14:10:57.351981+00:00'),
+  ('70da49b1-ae29-4da0-9223-21a8a9ced3f3', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000027', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351982+00:00', '2026-10-14T14:10:57.351982+00:00'),
+  ('349edc35-bc5c-465c-aa5b-1952dc5d33e2', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000027', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351984+00:00', '2026-10-14T14:10:57.351984+00:00'),
+  ('8049698d-84fb-4aa1-a44c-9cbfda6601eb', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000027', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351985+00:00', '2026-10-14T14:10:57.351985+00:00'),
+  ('e8ef0f73-f05f-472a-aee3-4793ee158507', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000027', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351987+00:00', '2026-10-14T14:10:57.351987+00:00'),
+  ('e6c05e63-7896-4c99-b79c-c2910127db15', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000027', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351988+00:00', '2026-10-14T14:10:57.351988+00:00'),
+  ('fd1ff44d-73b0-4878-914f-e4b3e5d096a7', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000028', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351990+00:00', '2026-10-14T14:10:57.351990+00:00'),
+  ('6c21ef11-7633-4ae4-b88b-3eb28ef0a590', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000028', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351991+00:00', '2026-10-14T14:10:57.351992+00:00'),
+  ('66c6c560-ea01-4ea4-880d-f86a36c3dc17', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000028', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351993+00:00', '2026-10-14T14:10:57.351993+00:00'),
+  ('bf397e93-f63e-41ea-85f6-fd10118a1624', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000028', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351994+00:00', '2026-10-14T14:10:57.351995+00:00'),
+  ('134dee10-029e-4196-9f53-91c9da15f32f', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000028', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351996+00:00', '2026-10-14T14:10:57.351996+00:00'),
+  ('6f2f96e0-bc81-4956-badb-12b7e8e4ed00', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000028', '2026-09-15', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.351997+00:00', '2026-10-14T14:10:57.351998+00:00'),
+  ('265c0e63-475f-44bf-83ee-d14ae85e2538', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000029', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.351999+00:00', '2026-10-14T14:10:57.351999+00:00'),
+  ('e896d515-d7ac-43af-bf41-269284024797', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000029', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352001+00:00', '2026-10-14T14:10:57.352001+00:00'),
+  ('49ffc1ae-c6e2-495b-9830-47a9381d62b4', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000029', '2026-08-24', 'LATE', NULL, NULL, '2026-10-14T14:10:57.352002+00:00', '2026-10-14T14:10:57.352002+00:00'),
+  ('659b62da-3933-4e94-9d03-ababf78adfd2', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000029', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352004+00:00', '2026-10-14T14:10:57.352004+00:00'),
+  ('0d50c3bf-8ab9-4305-bed7-0b9f0f45e3e8', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000029', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352005+00:00', '2026-10-14T14:10:57.352005+00:00'),
+  ('027439b9-6211-47cd-a64f-89db55bf465e', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000029', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352008+00:00', '2026-10-14T14:10:57.352008+00:00'),
+  ('55ff0ef2-c8bb-4dfb-a725-c6492f3e47a0', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000030', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352010+00:00', '2026-10-14T14:10:57.352010+00:00'),
+  ('bd29572f-5309-4c24-b5b9-65b0f6a1fd3e', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000030', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352012+00:00', '2026-10-14T14:10:57.352013+00:00'),
+  ('084806f2-16e7-4a06-b4a9-44d40971ffbe', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000030', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352015+00:00', '2026-10-14T14:10:57.352015+00:00'),
+  ('e8b58ef2-45dd-46ce-a2ac-9e4bc0ae42be', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000030', '2026-09-01', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.352016+00:00', '2026-10-14T14:10:57.352017+00:00'),
+  ('4658341f-74b2-40bd-a9ff-9343d6b846f4', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000030', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352018+00:00', '2026-10-14T14:10:57.352018+00:00'),
+  ('0bfb9c34-60c1-40c4-99ea-7a4138684df8', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000030', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352019+00:00', '2026-10-14T14:10:57.352020+00:00'),
+  ('c601e142-243a-4dbd-91e6-bcf4f032ac20', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000031', '2026-08-10', 'LATE', NULL, NULL, '2026-10-14T14:10:57.352021+00:00', '2026-10-14T14:10:57.352021+00:00'),
+  ('f330e0e7-3103-4107-a318-fb67d5782eed', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000031', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352022+00:00', '2026-10-14T14:10:57.352023+00:00'),
+  ('1bbbdc81-d80f-49bb-9e58-e276e27cd802', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000031', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352024+00:00', '2026-10-14T14:10:57.352024+00:00'),
+  ('3caaa1ce-dede-4ae5-9ad6-77f072df83c0', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000031', '2026-09-01', 'LATE', NULL, NULL, '2026-10-14T14:10:57.352025+00:00', '2026-10-14T14:10:57.352026+00:00'),
+  ('0cc8a4a3-229a-430c-b4b8-75797b3ad637', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000031', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352027+00:00', '2026-10-14T14:10:57.352027+00:00'),
+  ('a6d098b0-e8b7-4afc-80f0-55c29caf2cec', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000031', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352028+00:00', '2026-10-14T14:10:57.352029+00:00'),
+  ('26ea6881-d039-424f-a9e9-fba00d59adf9', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000032', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352030+00:00', '2026-10-14T14:10:57.352030+00:00'),
+  ('d9cc9931-3f69-47c8-8d48-808f419a3594', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000032', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352031+00:00', '2026-10-14T14:10:57.352032+00:00'),
+  ('da7419e8-2752-480a-ab7d-354565cbe150', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000032', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352033+00:00', '2026-10-14T14:10:57.352033+00:00'),
+  ('618d4b56-368e-44bf-af75-0fa624535702', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000032', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352035+00:00', '2026-10-14T14:10:57.352035+00:00'),
+  ('948cee29-b628-458f-9036-58931f2b5f00', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000032', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352036+00:00', '2026-10-14T14:10:57.352037+00:00'),
+  ('fbf585d2-3d98-4802-9ff7-7c9065c447b6', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000032', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352038+00:00', '2026-10-14T14:10:57.352038+00:00'),
+  ('24b943d1-b410-4e14-9958-8bc906c2bb9a', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000033', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352039+00:00', '2026-10-14T14:10:57.352040+00:00'),
+  ('7e78fcbe-7543-420d-93c6-fed03a428377', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000033', '2026-08-17', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.352041+00:00', '2026-10-14T14:10:57.352041+00:00'),
+  ('15401910-6a2b-41a3-9f07-4d73457f1887', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000033', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352042+00:00', '2026-10-14T14:10:57.352043+00:00'),
+  ('868d9217-3bfb-43d6-89ee-abc08ea2db9e', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000033', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352044+00:00', '2026-10-14T14:10:57.352044+00:00'),
+  ('5c043069-7765-4105-9d55-c8e67d88a4d3', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000033', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352045+00:00', '2026-10-14T14:10:57.352046+00:00'),
+  ('984883f6-bf16-4fa3-a451-914da7f6d95e', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000033', '2026-09-15', 'LATE', NULL, NULL, '2026-10-14T14:10:57.352047+00:00', '2026-10-14T14:10:57.352047+00:00'),
+  ('37a9c173-d13a-4ea1-b811-fd127f284eab', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000034', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352049+00:00', '2026-10-14T14:10:57.352049+00:00'),
+  ('2c36a747-8829-43f3-bac2-fb364e4cac67', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000034', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352050+00:00', '2026-10-14T14:10:57.352050+00:00'),
+  ('59a3dbc9-0c19-4d72-acca-10c67970f4ee', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000034', '2026-08-24', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.352052+00:00', '2026-10-14T14:10:57.352052+00:00'),
+  ('de4b8517-8586-473e-8a5d-81d9a25b1e6e', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000034', '2026-09-01', 'LATE', NULL, NULL, '2026-10-14T14:10:57.352054+00:00', '2026-10-14T14:10:57.352054+00:00'),
+  ('4592dcc1-ba13-4982-9f01-d37705fb12c3', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000034', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352056+00:00', '2026-10-14T14:10:57.352056+00:00'),
+  ('a8088b23-e800-4fb3-a72d-bd0e7735a5f0', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000034', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352057+00:00', '2026-10-14T14:10:57.352058+00:00'),
+  ('d186ee46-e276-4893-9497-08b9e05efa64', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000035', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352059+00:00', '2026-10-14T14:10:57.352059+00:00'),
+  ('45d622b1-7cdd-4629-981b-73f5252af468', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000035', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352061+00:00', '2026-10-14T14:10:57.352061+00:00'),
+  ('b3464169-ced9-4cab-bd3b-b568172ea3d6', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000035', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352062+00:00', '2026-10-14T14:10:57.352062+00:00'),
+  ('e8b565ba-1143-4f01-9159-57d953fe557d', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000035', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352064+00:00', '2026-10-14T14:10:57.352064+00:00'),
+  ('60bcec5b-1184-4567-a80a-47346010fdba', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000035', '2026-09-08', 'LATE', NULL, NULL, '2026-10-14T14:10:57.352065+00:00', '2026-10-14T14:10:57.352065+00:00'),
+  ('f41cbe94-4154-4dcf-9a68-013822375e7d', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'eeeeeeee-1111-0000-0000-000000000035', '2026-09-15', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.352067+00:00', '2026-10-14T14:10:57.352067+00:00'),
+  ('56b70444-c136-44f4-9d76-51090a452b26', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000036', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352068+00:00', '2026-10-14T14:10:57.352068+00:00'),
+  ('ecec4e65-9d28-4e52-ac3f-f8c4444b2a37', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000036', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352070+00:00', '2026-10-14T14:10:57.352070+00:00'),
+  ('5097524c-f8cb-4bac-a0fa-acc97db1c8e5', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000036', '2026-08-24', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.352071+00:00', '2026-10-14T14:10:57.352071+00:00'),
+  ('990e8431-71d3-46fc-855c-a58a70172e11', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000036', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352073+00:00', '2026-10-14T14:10:57.352073+00:00'),
+  ('43972687-0f8e-445c-a81b-107bfcd456ee', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000036', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352074+00:00', '2026-10-14T14:10:57.352075+00:00'),
+  ('ec9cd2f6-d1c1-4f8c-8bd0-2ad71ed98efc', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000036', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352076+00:00', '2026-10-14T14:10:57.352076+00:00'),
+  ('bb9c9706-cddc-4fb0-b3ea-933f64b81e6e', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000037', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352077+00:00', '2026-10-14T14:10:57.352078+00:00'),
+  ('50babb46-ddd4-46eb-b2e1-104fe0f7272f', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000037', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352079+00:00', '2026-10-14T14:10:57.352079+00:00'),
+  ('16edf7fc-ffbd-48a7-8f36-df5fbfeddf0e', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000037', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352080+00:00', '2026-10-14T14:10:57.352081+00:00'),
+  ('e7014785-9057-4a8d-8bd6-0b78db5eac4c', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000037', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352082+00:00', '2026-10-14T14:10:57.352082+00:00'),
+  ('521493b8-7361-4bfe-9472-ff7877923550', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000037', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352083+00:00', '2026-10-14T14:10:57.352084+00:00'),
+  ('723fa115-3e06-45de-a99a-f6a364795960', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000037', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352085+00:00', '2026-10-14T14:10:57.352085+00:00'),
+  ('7f72e49b-24e4-4f14-85ad-03d7485acd65', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000038', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352087+00:00', '2026-10-14T14:10:57.352087+00:00'),
+  ('38904440-67f2-44a1-aabf-3dd0361df5ae', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000038', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352088+00:00', '2026-10-14T14:10:57.352088+00:00'),
+  ('bb56450e-e8db-4648-97d8-3d9e0e0a7e05', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000038', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352090+00:00', '2026-10-14T14:10:57.352090+00:00'),
+  ('f5a09a12-7b4d-4ebb-8103-0d3a318e2e36', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000038', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352091+00:00', '2026-10-14T14:10:57.352091+00:00'),
+  ('bfec66cf-8d70-4398-889d-9e269ccb48bd', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000038', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352093+00:00', '2026-10-14T14:10:57.352093+00:00'),
+  ('d8a0cb54-807e-49ea-a4e5-082f9526eb4e', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000038', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352094+00:00', '2026-10-14T14:10:57.352094+00:00'),
+  ('d9cf597d-1294-4e4c-bd39-7a9d7289ea1a', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000039', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352096+00:00', '2026-10-14T14:10:57.352096+00:00'),
+  ('bd16237f-efe0-49a9-9334-a20e6ae3d3e2', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000039', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352098+00:00', '2026-10-14T14:10:57.352099+00:00'),
+  ('7d160870-d994-484c-8cc5-44e28477ec82', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000039', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352100+00:00', '2026-10-14T14:10:57.352100+00:00'),
+  ('b8a039dd-b4b7-42dd-b362-4ce75f23e57f', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000039', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352102+00:00', '2026-10-14T14:10:57.352102+00:00'),
+  ('a1bc376e-c0cd-4f13-8985-ae29e6e754ef', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000039', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352103+00:00', '2026-10-14T14:10:57.352103+00:00'),
+  ('b956ad63-fdc5-4e80-964d-4508ecc34db8', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000039', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352105+00:00', '2026-10-14T14:10:57.352105+00:00'),
+  ('a058ada2-9741-4c08-81b4-f6ca13dff916', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000040', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352106+00:00', '2026-10-14T14:10:57.352106+00:00'),
+  ('4ee18507-631d-4b2a-834c-2b788a9fcaf6', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000040', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352108+00:00', '2026-10-14T14:10:57.352108+00:00'),
+  ('0a43ea0b-92b0-44f9-b705-fee6f0cb05be', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000040', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352109+00:00', '2026-10-14T14:10:57.352109+00:00'),
+  ('233254b1-1112-4ac2-b4b7-6087e087ba05', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000040', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352111+00:00', '2026-10-14T14:10:57.352111+00:00'),
+  ('d6ab219b-9443-48a8-b678-4d702b99f12e', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000040', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352113+00:00', '2026-10-14T14:10:57.352114+00:00'),
+  ('5349c5aa-ee6d-4c2d-9295-f84d26c6b7b8', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000040', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352115+00:00', '2026-10-14T14:10:57.352115+00:00'),
+  ('41509bcb-16f0-4128-b923-6e9781cac610', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000041', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352116+00:00', '2026-10-14T14:10:57.352117+00:00'),
+  ('7d23a7a9-47ff-4ac9-8413-bdd77e871fcd', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000041', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352118+00:00', '2026-10-14T14:10:57.352118+00:00'),
+  ('601b637d-b560-41c1-be66-08a3a28a6846', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000041', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352120+00:00', '2026-10-14T14:10:57.352120+00:00'),
+  ('c30bd898-f4f0-4f15-a55a-1971a6d20e28', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000041', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352121+00:00', '2026-10-14T14:10:57.352122+00:00'),
+  ('54578cfc-b0d6-4d15-95fb-87688513788a', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000041', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352123+00:00', '2026-10-14T14:10:57.352123+00:00'),
+  ('82eb6d7e-dfc6-48ec-8e50-4be48a2eec63', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000041', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352124+00:00', '2026-10-14T14:10:57.352125+00:00'),
+  ('8804e2c9-ec32-4b18-9a71-5230bc0ae58f', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000042', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352126+00:00', '2026-10-14T14:10:57.352126+00:00'),
+  ('325ca6d6-9ebb-477a-a688-2b6dda121e40', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000042', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352127+00:00', '2026-10-14T14:10:57.352128+00:00'),
+  ('4ac1210b-5bf8-4e77-a63f-7be372fa5adb', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000042', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352129+00:00', '2026-10-14T14:10:57.352129+00:00'),
+  ('2c13eb4e-2b6b-4e5e-88fe-e7b04f195386', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000042', '2026-09-01', 'LATE', NULL, NULL, '2026-10-14T14:10:57.352131+00:00', '2026-10-14T14:10:57.352131+00:00'),
+  ('39cbdb71-e62a-4e08-9427-fed6af3ec46c', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000042', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352132+00:00', '2026-10-14T14:10:57.352132+00:00'),
+  ('b217e422-b603-4c81-a52e-ad760b736b56', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000042', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352134+00:00', '2026-10-14T14:10:57.352134+00:00'),
+  ('ec1ba9dc-7ae9-4439-9c77-c506b2280ac0', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000043', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352135+00:00', '2026-10-14T14:10:57.352135+00:00'),
+  ('df2d5595-db60-4b6f-b84c-7d43d41aa1e5', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000043', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352137+00:00', '2026-10-14T14:10:57.352137+00:00'),
+  ('9c074a4f-95a4-42dd-a88f-432c2a48e5ee', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000043', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352138+00:00', '2026-10-14T14:10:57.352139+00:00'),
+  ('13b25540-a240-41b2-9e6f-838e3389bda3', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000043', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352140+00:00', '2026-10-14T14:10:57.352140+00:00'),
+  ('44620cec-27a2-472c-ac36-7bf2a144899c', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000043', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352141+00:00', '2026-10-14T14:10:57.352142+00:00'),
+  ('f166392c-162c-4979-8d28-5f9e6fba554e', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000005', 'eeeeeeee-1111-0000-0000-000000000043', '2026-09-15', 'LATE', NULL, NULL, '2026-10-14T14:10:57.352143+00:00', '2026-10-14T14:10:57.352143+00:00'),
+  ('f3911d12-7aaa-4447-af3a-4d53ad66c3d1', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000044', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352145+00:00', '2026-10-14T14:10:57.352146+00:00'),
+  ('8a054aee-907a-4042-94aa-a157cac02c02', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000044', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352147+00:00', '2026-10-14T14:10:57.352148+00:00'),
+  ('16a71fba-6c4e-4f75-963c-d4f80c49eb66', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000044', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352149+00:00', '2026-10-14T14:10:57.352149+00:00'),
+  ('a2cc53b4-126a-4bfd-94ef-0202e526a9e3', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000044', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352150+00:00', '2026-10-14T14:10:57.352151+00:00'),
+  ('a62e7a7b-f628-4a59-8966-d77b3fd276a9', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000044', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352152+00:00', '2026-10-14T14:10:57.352152+00:00'),
+  ('d0c90eea-1ee8-4870-b707-b1c1d617246b', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000044', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352153+00:00', '2026-10-14T14:10:57.352154+00:00'),
+  ('73675d57-1fb1-464e-984f-1c79d146b5c6', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000045', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352155+00:00', '2026-10-14T14:10:57.352155+00:00'),
+  ('d20b3d0e-b625-4455-a584-87aa16bc79c7', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000045', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352157+00:00', '2026-10-14T14:10:57.352157+00:00'),
+  ('3da847da-ee56-4c0e-a567-28362f17c8fc', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000045', '2026-08-24', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.352158+00:00', '2026-10-14T14:10:57.352158+00:00'),
+  ('0cc0378c-eef9-44a9-9d65-8c65422afb5c', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000045', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352160+00:00', '2026-10-14T14:10:57.352160+00:00'),
+  ('0932f9aa-f8cb-4f20-af26-1d2e88177ac4', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000045', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352161+00:00', '2026-10-14T14:10:57.352162+00:00'),
+  ('23154bb4-063c-4610-8774-0fed903c4bcf', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000045', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352163+00:00', '2026-10-14T14:10:57.352163+00:00'),
+  ('4a5e276e-38da-478f-a578-f5ec48feb3d2', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000046', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352164+00:00', '2026-10-14T14:10:57.352165+00:00'),
+  ('756ecbee-e0e5-41fe-8a61-1afedf50c27f', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000046', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352166+00:00', '2026-10-14T14:10:57.352166+00:00'),
+  ('49d5a4f0-ebf1-41e2-8d18-78530c700d42', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000046', '2026-08-24', 'LATE', NULL, NULL, '2026-10-14T14:10:57.352167+00:00', '2026-10-14T14:10:57.352168+00:00'),
+  ('c5473e56-206c-45fe-a4a0-9876788b198a', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000046', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352169+00:00', '2026-10-14T14:10:57.352169+00:00'),
+  ('9824ab57-48db-47e2-a930-e6bfdf101e72', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000046', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352170+00:00', '2026-10-14T14:10:57.352171+00:00'),
+  ('fd954d19-cd20-4f71-970c-def4f91c363c', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000046', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352172+00:00', '2026-10-14T14:10:57.352172+00:00'),
+  ('6f4d0486-fcf7-4daf-b2d2-cf1164e4bc64', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000047', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352174+00:00', '2026-10-14T14:10:57.352174+00:00'),
+  ('898783f1-e3e6-4144-8fe3-17f036a88a69', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000047', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352175+00:00', '2026-10-14T14:10:57.352175+00:00'),
+  ('e29f2737-0500-4cae-8f4c-dc2f6fd8f3a5', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000047', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352177+00:00', '2026-10-14T14:10:57.352177+00:00'),
+  ('b802c759-dcf6-486e-b74f-93af5f88ea24', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000047', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352178+00:00', '2026-10-14T14:10:57.352179+00:00'),
+  ('5df0a207-500b-4930-a487-902188a0d743', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000047', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352180+00:00', '2026-10-14T14:10:57.352180+00:00'),
+  ('8933f625-d136-4662-9884-d4f22a318746', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000047', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352181+00:00', '2026-10-14T14:10:57.352181+00:00'),
+  ('71ad8e89-8241-49f8-ac71-d0800ef16c40', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000048', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352183+00:00', '2026-10-14T14:10:57.352183+00:00'),
+  ('60532709-633c-43a2-b771-860c7493614a', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000048', '2026-08-17', 'LATE', NULL, NULL, '2026-10-14T14:10:57.352184+00:00', '2026-10-14T14:10:57.352184+00:00'),
+  ('2d1e4b7e-1a62-4280-b8b5-a15c24ea33cb', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000048', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352186+00:00', '2026-10-14T14:10:57.352186+00:00'),
+  ('5fcd2d9a-9127-4c4f-ba49-77fcf0996332', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000048', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352187+00:00', '2026-10-14T14:10:57.352188+00:00'),
+  ('67613a13-1095-4c6c-813d-e250a1708f4a', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000048', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352190+00:00', '2026-10-14T14:10:57.352190+00:00'),
+  ('c365839a-19d6-4525-aab9-97c4359b3511', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000048', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352191+00:00', '2026-10-14T14:10:57.352192+00:00'),
+  ('997691fb-4b40-4ce9-b12f-7d5da3c2bc75', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000049', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352193+00:00', '2026-10-14T14:10:57.352193+00:00'),
+  ('040fbf1d-a8a6-4609-b88b-9674683f1e8b', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000049', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352195+00:00', '2026-10-14T14:10:57.352195+00:00'),
+  ('2f6fee10-358a-4174-a416-7f561a74c5fa', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000049', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352196+00:00', '2026-10-14T14:10:57.352196+00:00'),
+  ('09992027-8c1b-4240-b87d-0bfe6f67b22a', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000049', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352198+00:00', '2026-10-14T14:10:57.352198+00:00'),
+  ('c4606122-996c-4fcb-a371-14f1d9adc7ab', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000049', '2026-09-08', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352199+00:00', '2026-10-14T14:10:57.352200+00:00'),
+  ('c0278e7e-b480-4638-94a5-38666441c1ec', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000049', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352201+00:00', '2026-10-14T14:10:57.352201+00:00'),
+  ('c008eba3-c4ab-4735-981c-9319260c6747', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000050', '2026-08-10', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352202+00:00', '2026-10-14T14:10:57.352203+00:00'),
+  ('026d6959-0511-4b6e-b99e-e189cb0e22f0', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000050', '2026-08-17', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352204+00:00', '2026-10-14T14:10:57.352204+00:00'),
+  ('80443b2b-b0a8-49da-8d0e-28186a8b6645', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000050', '2026-08-24', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352206+00:00', '2026-10-14T14:10:57.352206+00:00'),
+  ('62b4a258-c210-473c-86cf-09e21e2522eb', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000050', '2026-09-01', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352207+00:00', '2026-10-14T14:10:57.352207+00:00'),
+  ('a52ab2e6-7089-4813-bf4d-beaa703e2efe', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000050', '2026-09-08', 'ABSENT', NULL, NULL, '2026-10-14T14:10:57.352209+00:00', '2026-10-14T14:10:57.352209+00:00'),
+  ('d455e614-6682-4f1c-a22f-aaa74e3dc855', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000006', 'eeeeeeee-1111-0000-0000-000000000050', '2026-09-15', 'PRESENT', NULL, NULL, '2026-10-14T14:10:57.352210+00:00', '2026-10-14T14:10:57.352210+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: assignments (2 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO assignments (id, tenant_id, offering_id, kind, title, description, due_at, max_marks, rubric_file_id, status, created_by, created_at, updated_at) VALUES
+  ('60606060-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', '50505050-0000-0000-0000-000000000001', 'ASSIGNMENT', 'Relational Schema Design & Normalization Project', 'Design 3NF schemas for enterprise e-commerce backend with BCNF proofs.', '2026-09-30T23:59:59+00:00', 100.00, NULL, 'PUBLISHED', 'aaaaaaaa-0000-0000-0000-000000000001', '2026-10-14T14:10:57.390465+00:00', '2026-10-14T14:10:57.390468+00:00'),
+  ('60606060-0000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', '50505050-0000-0000-0000-000000000004', 'ASSIGNMENT', 'Red-Black Tree and B-Tree Performance Analysis', 'Implement and benchmark cache locality of Balanced Search Trees in C++.', '2026-09-30T23:59:59+00:00', 100.00, NULL, 'PUBLISHED', 'aaaaaaaa-0000-0000-0000-000000000002', '2026-10-14T14:10:57.390469+00:00', '2026-10-14T14:10:57.390470+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: assignment_submissions (20 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO assignment_submissions (id, tenant_id, assignment_id, student_id, file_id, answers, submitted_at, marks, feedback, graded_by, status, created_at, updated_at) VALUES
+  ('905ed710-ccce-4c95-ad4b-00c33a9e1f9f', '11111111-1111-1111-1111-111111111111', '60606060-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000001', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395110+00:00', 88.50, 'Excellent schema normalization and diagram clarity.', NULL, 'GRADED', '2026-10-14T14:10:57.395113+00:00', '2026-10-14T14:10:57.395113+00:00'),
+  ('30513ffc-4ef9-4bff-b1a9-d1719db6a093', '11111111-1111-1111-1111-111111111111', '60606060-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000002', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395117+00:00', 88.50, 'Excellent schema normalization and diagram clarity.', NULL, 'GRADED', '2026-10-14T14:10:57.395117+00:00', '2026-10-14T14:10:57.395118+00:00'),
+  ('4955e94f-553f-429f-a180-5708b902c0f4', '11111111-1111-1111-1111-111111111111', '60606060-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000003', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395119+00:00', 88.50, 'Excellent schema normalization and diagram clarity.', NULL, 'GRADED', '2026-10-14T14:10:57.395120+00:00', '2026-10-14T14:10:57.395120+00:00'),
+  ('0c0202ed-02c9-4206-936d-889f5657ca48', '11111111-1111-1111-1111-111111111111', '60606060-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000004', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395121+00:00', 88.50, 'Excellent schema normalization and diagram clarity.', NULL, 'GRADED', '2026-10-14T14:10:57.395122+00:00', '2026-10-14T14:10:57.395123+00:00'),
+  ('d09b64a8-0034-4c76-8083-46f964fff2f7', '11111111-1111-1111-1111-111111111111', '60606060-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000005', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395129+00:00', 88.50, 'Excellent schema normalization and diagram clarity.', NULL, 'GRADED', '2026-10-14T14:10:57.395130+00:00', '2026-10-14T14:10:57.395131+00:00'),
+  ('19d5c245-c746-4f96-92cc-2698853c5d41', '11111111-1111-1111-1111-111111111111', '60606060-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000006', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395136+00:00', 88.50, 'Excellent schema normalization and diagram clarity.', NULL, 'GRADED', '2026-10-14T14:10:57.395137+00:00', '2026-10-14T14:10:57.395138+00:00'),
+  ('70989df3-1514-4668-a410-d6156b5bc4d0', '11111111-1111-1111-1111-111111111111', '60606060-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000007', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395142+00:00', 88.50, 'Excellent schema normalization and diagram clarity.', NULL, 'GRADED', '2026-10-14T14:10:57.395143+00:00', '2026-10-14T14:10:57.395144+00:00'),
+  ('8506fcbe-2393-49b8-9790-ad0e3dbc934f', '11111111-1111-1111-1111-111111111111', '60606060-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000008', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395150+00:00', 88.50, 'Excellent schema normalization and diagram clarity.', NULL, 'GRADED', '2026-10-14T14:10:57.395151+00:00', '2026-10-14T14:10:57.395153+00:00'),
+  ('5c2ea6e5-ecc5-4b2d-95ce-1bc3c7673e6b', '11111111-1111-1111-1111-111111111111', '60606060-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000009', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395157+00:00', 88.50, 'Excellent schema normalization and diagram clarity.', NULL, 'GRADED', '2026-10-14T14:10:57.395158+00:00', '2026-10-14T14:10:57.395159+00:00'),
+  ('4c83c561-2326-4df1-9216-8a9232ebf6c8', '11111111-1111-1111-1111-111111111111', '60606060-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000010', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395163+00:00', 88.50, 'Excellent schema normalization and diagram clarity.', NULL, 'GRADED', '2026-10-14T14:10:57.395165+00:00', '2026-10-14T14:10:57.395166+00:00'),
+  ('e927ca70-6bc3-403a-903d-f39e79b11af1', '22222222-2222-2222-2222-222222222222', '60606060-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000026', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395170+00:00', 92.00, 'Comprehensive benchmarking results and clean implementation.', NULL, 'GRADED', '2026-10-14T14:10:57.395171+00:00', '2026-10-14T14:10:57.395172+00:00'),
+  ('aa77b512-7f97-46d1-941a-1b1d1105bc10', '22222222-2222-2222-2222-222222222222', '60606060-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000027', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395177+00:00', 92.00, 'Comprehensive benchmarking results and clean implementation.', NULL, 'GRADED', '2026-10-14T14:10:57.395178+00:00', '2026-10-14T14:10:57.395179+00:00'),
+  ('38873074-6b23-42dc-8b81-f3a257e7365d', '22222222-2222-2222-2222-222222222222', '60606060-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000028', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395206+00:00', 92.00, 'Comprehensive benchmarking results and clean implementation.', NULL, 'GRADED', '2026-10-14T14:10:57.395207+00:00', '2026-10-14T14:10:57.395209+00:00'),
+  ('9ba43327-63c6-4a97-b90f-27e52a48ab33', '22222222-2222-2222-2222-222222222222', '60606060-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000029', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395214+00:00', 92.00, 'Comprehensive benchmarking results and clean implementation.', NULL, 'GRADED', '2026-10-14T14:10:57.395215+00:00', '2026-10-14T14:10:57.395216+00:00'),
+  ('eff17534-85e3-42a2-885f-a7e823ce86cd', '22222222-2222-2222-2222-222222222222', '60606060-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000030', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395221+00:00', 92.00, 'Comprehensive benchmarking results and clean implementation.', NULL, 'GRADED', '2026-10-14T14:10:57.395222+00:00', '2026-10-14T14:10:57.395223+00:00'),
+  ('6879ae2d-e67c-4bcc-9754-43a118ac0dd6', '22222222-2222-2222-2222-222222222222', '60606060-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000031', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395228+00:00', 92.00, 'Comprehensive benchmarking results and clean implementation.', NULL, 'GRADED', '2026-10-14T14:10:57.395229+00:00', '2026-10-14T14:10:57.395230+00:00'),
+  ('a7f7511f-fc60-4815-b6ce-9c1121410b60', '22222222-2222-2222-2222-222222222222', '60606060-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000032', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395235+00:00', 92.00, 'Comprehensive benchmarking results and clean implementation.', NULL, 'GRADED', '2026-10-14T14:10:57.395236+00:00', '2026-10-14T14:10:57.395237+00:00'),
+  ('f045cc0d-c403-4232-a4cf-9d136ae2d014', '22222222-2222-2222-2222-222222222222', '60606060-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000033', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395241+00:00', 92.00, 'Comprehensive benchmarking results and clean implementation.', NULL, 'GRADED', '2026-10-14T14:10:57.395242+00:00', '2026-10-14T14:10:57.395243+00:00'),
+  ('427538d2-07c3-45b5-bfd6-a6957e05931b', '22222222-2222-2222-2222-222222222222', '60606060-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000034', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395248+00:00', 92.00, 'Comprehensive benchmarking results and clean implementation.', NULL, 'GRADED', '2026-10-14T14:10:57.395249+00:00', '2026-10-14T14:10:57.395250+00:00'),
+  ('3bed33fb-b15d-43f1-b0fd-d4bad43b33f5', '22222222-2222-2222-2222-222222222222', '60606060-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000035', NULL, '{}'::jsonb, '2026-10-14T14:10:57.395255+00:00', 92.00, 'Comprehensive benchmarking results and clean implementation.', NULL, 'GRADED', '2026-10-14T14:10:57.395256+00:00', '2026-10-14T14:10:57.395257+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: grading_scales (12 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO grading_scales (id, tenant_id, grade, min_marks, max_marks, grade_points, description, created_at, updated_at) VALUES
+  ('5f5ddaf5-80f4-4e25-ad78-9d22b2c232ed', '11111111-1111-1111-1111-111111111111', 'O', 90.00, 100.00, 10.00, 'Outstanding', '2026-10-14T14:10:57.406988+00:00', '2026-10-14T14:10:57.406991+00:00'),
+  ('a16f98ae-39fe-43ec-b74d-2cc59067a540', '11111111-1111-1111-1111-111111111111', 'A+', 80.00, 89.99, 9.00, 'Excellent', '2026-10-14T14:10:57.406995+00:00', '2026-10-14T14:10:57.406995+00:00'),
+  ('81129fac-8214-45f6-b888-b9248d7b32d0', '11111111-1111-1111-1111-111111111111', 'A', 70.00, 79.99, 8.00, 'Very Good', '2026-10-14T14:10:57.406998+00:00', '2026-10-14T14:10:57.406998+00:00'),
+  ('a69431b9-83c5-49e4-8971-aec37f23fb9e', '11111111-1111-1111-1111-111111111111', 'B+', 60.00, 69.99, 7.00, 'Good', '2026-10-14T14:10:57.407001+00:00', '2026-10-14T14:10:57.407002+00:00'),
+  ('12a11e85-c99f-4d66-9b3c-7fe98dbb80ea', '11111111-1111-1111-1111-111111111111', 'B', 50.00, 59.99, 6.00, 'Above Average', '2026-10-14T14:10:57.407004+00:00', '2026-10-14T14:10:57.407004+00:00'),
+  ('b83e21e9-afe6-4ed6-9568-afef2f5d01be', '11111111-1111-1111-1111-111111111111', 'C', 40.00, 49.99, 5.00, 'Pass', '2026-10-14T14:10:57.407006+00:00', '2026-10-14T14:10:57.407006+00:00'),
+  ('621de605-fd0c-4415-836c-88304a98fa87', '11111111-1111-1111-1111-111111111111', 'F', 0.00, 39.99, 0.00, 'Fail', '2026-10-14T14:10:57.407008+00:00', '2026-10-14T14:10:57.407009+00:00'),
+  ('6590d74b-a3b0-454a-9bc6-3cac5c911fc4', '22222222-2222-2222-2222-222222222222', 'A+', 90.00, 100.00, 10.00, 'Outstanding', '2026-10-14T14:10:57.407010+00:00', '2026-10-14T14:10:57.407011+00:00'),
+  ('562c3de5-04c9-4213-8ca2-3796bb20fd11', '22222222-2222-2222-2222-222222222222', 'A', 80.00, 89.99, 9.00, 'Excellent', '2026-10-14T14:10:57.407012+00:00', '2026-10-14T14:10:57.407013+00:00'),
+  ('1850e25e-7000-4f7e-8738-9a4b6d70be70', '22222222-2222-2222-2222-222222222222', 'B', 70.00, 79.99, 8.00, 'Good', '2026-10-14T14:10:57.407014+00:00', '2026-10-14T14:10:57.407015+00:00'),
+  ('8cad68ef-90cd-4cfb-b1e8-40cb10cedd1e', '22222222-2222-2222-2222-222222222222', 'C', 50.00, 69.99, 6.00, 'Average', '2026-10-14T14:10:57.407016+00:00', '2026-10-14T14:10:57.407017+00:00'),
+  ('800b237b-bdc7-47ab-b475-7d65af1743c7', '22222222-2222-2222-2222-222222222222', 'F', 0.00, 49.99, 0.00, 'Fail', '2026-10-14T14:10:57.407019+00:00', '2026-10-14T14:10:57.407019+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: grade_records (20 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO grade_records (id, tenant_id, student_id, offering_id, internal_marks, final_marks, grade, grade_points, status, submitted_by, approved_by, published_at, created_at, updated_at) VALUES
+  ('19a83e10-b9f4-434c-9e59-c3487aa1fb22', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000001', '50505050-0000-0000-0000-000000000001', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.409832+00:00', '2026-10-14T14:10:57.414274+00:00', '2026-10-14T14:10:57.414284+00:00'),
+  ('825271b9-70c4-4526-bb46-1a1acd68d481', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000001', '50505050-0000-0000-0000-000000000002', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.409873+00:00', '2026-10-14T14:10:57.414298+00:00', '2026-10-14T14:10:57.414301+00:00'),
+  ('49def90c-bdb4-4aa0-b527-963cabf5d485', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000002', '50505050-0000-0000-0000-000000000001', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.409892+00:00', '2026-10-14T14:10:57.414310+00:00', '2026-10-14T14:10:57.414311+00:00'),
+  ('581bee7b-9433-49b3-aa03-51031f3058e7', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000002', '50505050-0000-0000-0000-000000000002', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.409911+00:00', '2026-10-14T14:10:57.414317+00:00', '2026-10-14T14:10:57.414319+00:00'),
+  ('afc817cb-0430-4c0e-b672-f3e6e3206367', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000003', '50505050-0000-0000-0000-000000000001', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.409928+00:00', '2026-10-14T14:10:57.414324+00:00', '2026-10-14T14:10:57.414326+00:00'),
+  ('1c1bb88f-688b-4c88-b353-97c93261cfa0', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000003', '50505050-0000-0000-0000-000000000002', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.409947+00:00', '2026-10-14T14:10:57.414330+00:00', '2026-10-14T14:10:57.414332+00:00'),
+  ('6bdad3c6-d5a1-4fb3-abd0-d1026b451442', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000004', '50505050-0000-0000-0000-000000000001', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.409964+00:00', '2026-10-14T14:10:57.414336+00:00', '2026-10-14T14:10:57.414337+00:00'),
+  ('5a8536c2-8dea-439c-8bf9-42771deed22c', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000004', '50505050-0000-0000-0000-000000000002', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.409980+00:00', '2026-10-14T14:10:57.414344+00:00', '2026-10-14T14:10:57.414345+00:00'),
+  ('21e1fa2f-0958-45fc-a6da-c290cf45d181', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000005', '50505050-0000-0000-0000-000000000001', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.409997+00:00', '2026-10-14T14:10:57.414349+00:00', '2026-10-14T14:10:57.414350+00:00'),
+  ('353bb30a-975c-4df8-879f-69d2639da635', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000005', '50505050-0000-0000-0000-000000000002', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.410012+00:00', '2026-10-14T14:10:57.414355+00:00', '2026-10-14T14:10:57.414356+00:00'),
+  ('976213df-4994-4517-8e2b-b7505ce56c7c', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000006', '50505050-0000-0000-0000-000000000001', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.410029+00:00', '2026-10-14T14:10:57.414360+00:00', '2026-10-14T14:10:57.414361+00:00'),
+  ('85c07b07-2069-451b-b154-69d3566355ca', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000006', '50505050-0000-0000-0000-000000000002', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.410045+00:00', '2026-10-14T14:10:57.414366+00:00', '2026-10-14T14:10:57.414367+00:00'),
+  ('4fa788c3-c49b-4753-a11b-363eac32958e', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000007', '50505050-0000-0000-0000-000000000001', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.410063+00:00', '2026-10-14T14:10:57.414371+00:00', '2026-10-14T14:10:57.414372+00:00'),
+  ('cad1bc0e-cc99-4915-8d3e-dfce91f22dad', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000007', '50505050-0000-0000-0000-000000000002', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.410080+00:00', '2026-10-14T14:10:57.414377+00:00', '2026-10-14T14:10:57.414378+00:00'),
+  ('3123c08a-6fe2-4389-acad-580e25e5b265', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000008', '50505050-0000-0000-0000-000000000001', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.410097+00:00', '2026-10-14T14:10:57.414382+00:00', '2026-10-14T14:10:57.414384+00:00'),
+  ('35534ec8-c520-4de4-bdc6-b99bcc1eeb56', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000008', '50505050-0000-0000-0000-000000000002', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.410110+00:00', '2026-10-14T14:10:57.414389+00:00', '2026-10-14T14:10:57.414390+00:00'),
+  ('e0b080d6-b3f2-42cb-8dd9-4c13f67849cd', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000009', '50505050-0000-0000-0000-000000000001', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.410121+00:00', '2026-10-14T14:10:57.414395+00:00', '2026-10-14T14:10:57.414396+00:00'),
+  ('244a0275-603b-4137-8cf9-d3d937d72d9a', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000009', '50505050-0000-0000-0000-000000000002', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.410132+00:00', '2026-10-14T14:10:57.414400+00:00', '2026-10-14T14:10:57.414401+00:00'),
+  ('cca05f30-5d7d-43f6-b6c8-ff21c56fb19e', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000010', '50505050-0000-0000-0000-000000000001', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.410143+00:00', '2026-10-14T14:10:57.414406+00:00', '2026-10-14T14:10:57.414407+00:00'),
+  ('09873356-c6e1-410b-a612-c4c4e91bb96d', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000010', '50505050-0000-0000-0000-000000000002', 38.00, 48.00, 'A+', 9.00, 'APPROVED', NULL, NULL, '2026-10-14T14:10:57.410155+00:00', '2026-10-14T14:10:57.414411+00:00', '2026-10-14T14:10:57.414413+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: student_term_results (50 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO student_term_results (id, tenant_id, student_id, term_id, sgpa, cgpa, credits_earned, published_at, created_at, updated_at) VALUES
+  ('6d608451-696a-4e70-af88-ada9d2df8357', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000001', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422603+00:00', '2026-10-14T14:10:57.424490+00:00', '2026-10-14T14:10:57.424491+00:00'),
+  ('c89c84fa-8064-453d-b8b4-76ca0517052d', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000002', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422649+00:00', '2026-10-14T14:10:57.424495+00:00', '2026-10-14T14:10:57.424495+00:00'),
+  ('1ba27633-590c-4ce6-a3af-007411af1240', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000003', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422663+00:00', '2026-10-14T14:10:57.424497+00:00', '2026-10-14T14:10:57.424497+00:00'),
+  ('12ccc55b-af01-4bf8-a88c-71b13432052a', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000004', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422673+00:00', '2026-10-14T14:10:57.424499+00:00', '2026-10-14T14:10:57.424499+00:00'),
+  ('26b6d891-9c42-4f33-acac-2bc0fc007b18', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000005', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422682+00:00', '2026-10-14T14:10:57.424500+00:00', '2026-10-14T14:10:57.424501+00:00'),
+  ('805c927c-745d-4469-ac05-0be998290a70', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000006', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422691+00:00', '2026-10-14T14:10:57.424502+00:00', '2026-10-14T14:10:57.424502+00:00'),
+  ('6956a8c1-7b80-4d4d-a59f-c284434f27f8', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000007', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422701+00:00', '2026-10-14T14:10:57.424503+00:00', '2026-10-14T14:10:57.424504+00:00'),
+  ('6b02ab31-503d-40ec-9a78-9a1776814ad2', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000008', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422710+00:00', '2026-10-14T14:10:57.424505+00:00', '2026-10-14T14:10:57.424505+00:00'),
+  ('3e3a0381-d8ac-4707-bf54-1c5e34e02f49', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000009', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422719+00:00', '2026-10-14T14:10:57.424506+00:00', '2026-10-14T14:10:57.424507+00:00'),
+  ('2133393e-b5ad-4d61-b06e-eff8c9de6ed5', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000010', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422728+00:00', '2026-10-14T14:10:57.424508+00:00', '2026-10-14T14:10:57.424508+00:00'),
+  ('6c90dee1-64a8-49dd-9f67-45df197f058f', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000011', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422736+00:00', '2026-10-14T14:10:57.424510+00:00', '2026-10-14T14:10:57.424510+00:00'),
+  ('35aa3164-a150-43e8-81a2-9f90892bc642', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000012', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422745+00:00', '2026-10-14T14:10:57.424511+00:00', '2026-10-14T14:10:57.424511+00:00'),
+  ('591ab1f2-b7a0-4e49-9bf5-85601e3bf7a8', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000013', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422754+00:00', '2026-10-14T14:10:57.424513+00:00', '2026-10-14T14:10:57.424513+00:00'),
+  ('ccd5428b-e12c-4092-a618-bbc8e404fdec', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000014', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422762+00:00', '2026-10-14T14:10:57.424514+00:00', '2026-10-14T14:10:57.424515+00:00'),
+  ('a9d8394a-643a-489a-9032-a81fd83b3d7a', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000015', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422771+00:00', '2026-10-14T14:10:57.424516+00:00', '2026-10-14T14:10:57.424516+00:00'),
+  ('b5d8ee84-dbbd-4fc8-bfa6-914d92cc0bc4', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000016', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422779+00:00', '2026-10-14T14:10:57.424517+00:00', '2026-10-14T14:10:57.424518+00:00'),
+  ('e2710ac4-583a-4bfc-a24b-c453b219fa8c', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000017', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422788+00:00', '2026-10-14T14:10:57.424519+00:00', '2026-10-14T14:10:57.424519+00:00'),
+  ('1b62be65-464c-47a3-8928-5f43bd35a0b1', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000018', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422797+00:00', '2026-10-14T14:10:57.424520+00:00', '2026-10-14T14:10:57.424521+00:00'),
+  ('b5f23e9b-549a-4a2d-8889-436b11def52b', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000019', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422805+00:00', '2026-10-14T14:10:57.424522+00:00', '2026-10-14T14:10:57.424522+00:00'),
+  ('79084ee9-36f4-4952-b732-352caa35bb86', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000020', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422814+00:00', '2026-10-14T14:10:57.424523+00:00', '2026-10-14T14:10:57.424524+00:00'),
+  ('1133e7af-0f97-4db1-8aae-6eec8f33497f', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000021', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422822+00:00', '2026-10-14T14:10:57.424525+00:00', '2026-10-14T14:10:57.424526+00:00'),
+  ('d38d1113-accb-4672-9b31-23f4c6d3cd4e', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000022', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422854+00:00', '2026-10-14T14:10:57.424527+00:00', '2026-10-14T14:10:57.424527+00:00'),
+  ('f1cb3130-1153-4a61-b1ca-f40e06df1d8d', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000023', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422863+00:00', '2026-10-14T14:10:57.424528+00:00', '2026-10-14T14:10:57.424529+00:00'),
+  ('5c936c5a-9bd1-45b4-9094-008f88f31d82', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000024', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422872+00:00', '2026-10-14T14:10:57.424530+00:00', '2026-10-14T14:10:57.424530+00:00'),
+  ('e13ac640-a456-443b-a186-339507e0394c', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000025', '10101010-0000-0000-0000-000000000001', 8.85, 8.70, 22, '2026-10-14T14:10:57.422881+00:00', '2026-10-14T14:10:57.424531+00:00', '2026-10-14T14:10:57.424532+00:00'),
+  ('2c7fd642-766f-47f7-beb7-5c97f3d15e82', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000026', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.422891+00:00', '2026-10-14T14:10:57.424533+00:00', '2026-10-14T14:10:57.424533+00:00'),
+  ('fc1366a2-3b48-462d-aa17-9939f0c3f0b0', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000027', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.422912+00:00', '2026-10-14T14:10:57.424535+00:00', '2026-10-14T14:10:57.424535+00:00'),
+  ('2d48c986-8569-4a60-8a31-0d3b42e667db', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000028', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.422922+00:00', '2026-10-14T14:10:57.424536+00:00', '2026-10-14T14:10:57.424536+00:00'),
+  ('6ccc8a19-fe0d-4d5c-b8d8-3d5c36425115', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000029', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.422931+00:00', '2026-10-14T14:10:57.424538+00:00', '2026-10-14T14:10:57.424538+00:00'),
+  ('824c881a-269e-4079-8c74-de9913732a02', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000030', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.422940+00:00', '2026-10-14T14:10:57.424539+00:00', '2026-10-14T14:10:57.424540+00:00'),
+  ('7e9359c0-3bbb-4495-94d8-062d9e6dc907', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000031', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.422948+00:00', '2026-10-14T14:10:57.424541+00:00', '2026-10-14T14:10:57.424541+00:00'),
+  ('e30c87c1-f4b7-4ad8-ade7-1887e06b5c9e', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000032', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.422957+00:00', '2026-10-14T14:10:57.424542+00:00', '2026-10-14T14:10:57.424543+00:00'),
+  ('5f7058bc-17ba-4ca8-a38f-adcc93187cfc', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000033', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.422965+00:00', '2026-10-14T14:10:57.424545+00:00', '2026-10-14T14:10:57.424545+00:00'),
+  ('af6d2d9a-2bde-4c23-914d-c8678dbc85b2', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000034', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.422974+00:00', '2026-10-14T14:10:57.424546+00:00', '2026-10-14T14:10:57.424547+00:00'),
+  ('9b4a4f7d-1e0c-4bf8-a661-c8218114e905', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000035', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.422982+00:00', '2026-10-14T14:10:57.424548+00:00', '2026-10-14T14:10:57.424548+00:00'),
+  ('f7000c38-b022-4460-bdf5-c8a75a9b630e', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000036', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.422991+00:00', '2026-10-14T14:10:57.424549+00:00', '2026-10-14T14:10:57.424550+00:00'),
+  ('77b98a98-12d1-4a60-9a83-92cd0401bdc6', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000037', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423000+00:00', '2026-10-14T14:10:57.424551+00:00', '2026-10-14T14:10:57.424552+00:00'),
+  ('c0443513-758a-479f-8690-af0db005c3e0', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000038', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423009+00:00', '2026-10-14T14:10:57.424553+00:00', '2026-10-14T14:10:57.424553+00:00'),
+  ('c165cad3-a245-4fe5-9e7c-137f14121857', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000039', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423017+00:00', '2026-10-14T14:10:57.424554+00:00', '2026-10-14T14:10:57.424555+00:00'),
+  ('dc4f0e2a-853c-4373-92f6-c7861609c01f', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000040', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423026+00:00', '2026-10-14T14:10:57.424556+00:00', '2026-10-14T14:10:57.424556+00:00'),
+  ('80efa0c1-4c0f-47b4-bcd8-68d0f1a46eb2', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000041', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423034+00:00', '2026-10-14T14:10:57.424557+00:00', '2026-10-14T14:10:57.424558+00:00'),
+  ('c21c44cd-28ea-45ab-a087-22aee3b62cfe', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000042', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423044+00:00', '2026-10-14T14:10:57.424559+00:00', '2026-10-14T14:10:57.424559+00:00'),
+  ('3f2d9564-bbc0-49bf-a6aa-58b1bef68251', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000043', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423052+00:00', '2026-10-14T14:10:57.424560+00:00', '2026-10-14T14:10:57.424561+00:00'),
+  ('6c2f13cd-4d58-4c3b-bcbf-4fdbf3b5125b', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000044', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423061+00:00', '2026-10-14T14:10:57.424562+00:00', '2026-10-14T14:10:57.424562+00:00'),
+  ('fe72f561-f61c-436f-a475-56cdfabb36e6', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000045', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423076+00:00', '2026-10-14T14:10:57.424563+00:00', '2026-10-14T14:10:57.424564+00:00'),
+  ('0b4b093f-548a-47b6-871e-f016fcf34c3b', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000046', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423084+00:00', '2026-10-14T14:10:57.424565+00:00', '2026-10-14T14:10:57.424565+00:00'),
+  ('2fa3a5f0-69b6-4ee3-b26e-39970b763358', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000047', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423093+00:00', '2026-10-14T14:10:57.424567+00:00', '2026-10-14T14:10:57.424567+00:00'),
+  ('1925c80b-1f04-4f5b-b472-2c5427098804', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000048', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423102+00:00', '2026-10-14T14:10:57.424568+00:00', '2026-10-14T14:10:57.424569+00:00'),
+  ('623c351a-d839-4ebe-adb2-1eed374f8cb7', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000049', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423111+00:00', '2026-10-14T14:10:57.424570+00:00', '2026-10-14T14:10:57.424571+00:00'),
+  ('cb93530b-155b-4895-b9fa-e47549170bdd', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000050', '10101010-0000-0000-0000-000000000003', 9.10, 8.95, 24, '2026-10-14T14:10:57.423119+00:00', '2026-10-14T14:10:57.424572+00:00', '2026-10-14T14:10:57.424572+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: fee_structures (2 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO fee_structures (id, tenant_id, programme_id, term_id, name, amount, due_date, created_at, updated_at) VALUES
+  ('70707070-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'dddddddd-0000-0000-0000-000000000001', '10101010-0000-0000-0000-000000000001', 'Tuition & Laboratory Fee (Fall 2026)', 85000.00, '2026-08-30', '2026-10-14T14:10:57.434858+00:00', '2026-10-14T14:10:57.434861+00:00'),
+  ('70707070-0000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', 'dddddddd-0000-0000-0000-000000000004', '10101010-0000-0000-0000-000000000003', 'Semester Academic & Facility Fee (Fall 2026)', 95000.00, '2026-08-30', '2026-10-14T14:10:57.434863+00:00', '2026-10-14T14:10:57.434863+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: fee_records (25 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO fee_records (id, tenant_id, student_id, fee_structure_id, amount_due, discount, due_date, paid_date, status, created_at, updated_at) VALUES
+  ('0cb0077b-afcc-4503-a98b-7a85fb14798e', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000001', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.438205+00:00', '2026-10-14T14:10:57.438207+00:00'),
+  ('42a30d4d-e20e-4d41-aee5-571d81f6ab68', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000002', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.440530+00:00', '2026-10-14T14:10:57.440531+00:00'),
+  ('7081915c-b65a-4346-9de5-4f7083523c1d', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000003', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.442328+00:00', '2026-10-14T14:10:57.442329+00:00'),
+  ('6cae36a4-dccb-4ebc-bfed-aa6037f59e39', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000004', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.443653+00:00', '2026-10-14T14:10:57.443654+00:00'),
+  ('9fd61ed8-1a74-4741-9f35-58253652bf88', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000005', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.445248+00:00', '2026-10-14T14:10:57.445249+00:00'),
+  ('896f0219-aa59-4d3e-a79f-26696a0bd845', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000006', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.449990+00:00', '2026-10-14T14:10:57.449991+00:00'),
+  ('836436b1-de46-413d-8754-c5ffe75decb0', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000007', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.452797+00:00', '2026-10-14T14:10:57.452798+00:00'),
+  ('ec79643c-ef84-4b9a-8f0e-9008ab8bf65d', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000008', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.454581+00:00', '2026-10-14T14:10:57.454582+00:00'),
+  ('82833a5e-7569-4604-adc3-7650e729b565', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000009', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.457154+00:00', '2026-10-14T14:10:57.457155+00:00'),
+  ('5d59179a-ccab-4d32-b1cd-f22489cc1b4f', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000010', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.459160+00:00', '2026-10-14T14:10:57.459161+00:00'),
+  ('e29bd1be-4d89-4e57-8af4-ef0bf6f10ff8', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000011', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.460598+00:00', '2026-10-14T14:10:57.460600+00:00'),
+  ('ac99b9ab-586e-4fd6-93d6-46ede64ecf44', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000012', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.462974+00:00', '2026-10-14T14:10:57.462975+00:00'),
+  ('a7558885-2160-42c3-9a10-684504afd113', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000013', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.466203+00:00', '2026-10-14T14:10:57.466205+00:00'),
+  ('7f543fd9-bbba-46db-b9b3-b1b1fac8fede', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000014', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.467899+00:00', '2026-10-14T14:10:57.467900+00:00'),
+  ('ec79206e-c9ed-46e7-b3e0-b604f7f62442', '11111111-1111-1111-1111-111111111111', 'eeeeeeee-1111-0000-0000-000000000015', '70707070-0000-0000-0000-000000000001', 85000.00, 0.00, '2026-08-30', '2026-08-20', 'PAID', '2026-10-14T14:10:57.469261+00:00', '2026-10-14T14:10:57.469262+00:00'),
+  ('4878527a-434e-41a1-9c71-bd361d00c333', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000026', '70707070-0000-0000-0000-000000000002', 95000.00, 5000.00, '2026-08-30', '2026-08-22', 'PAID', '2026-10-14T14:10:57.470563+00:00', '2026-10-14T14:10:57.470564+00:00'),
+  ('cef4287b-6c77-4736-a245-932e729d6173', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000027', '70707070-0000-0000-0000-000000000002', 95000.00, 5000.00, '2026-08-30', '2026-08-22', 'PAID', '2026-10-14T14:10:57.472271+00:00', '2026-10-14T14:10:57.472272+00:00'),
+  ('894316de-7b3e-47a8-b670-9060dca58b3a', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000028', '70707070-0000-0000-0000-000000000002', 95000.00, 5000.00, '2026-08-30', '2026-08-22', 'PAID', '2026-10-14T14:10:57.473633+00:00', '2026-10-14T14:10:57.473634+00:00'),
+  ('ba2fbcdd-0a59-4fce-a4ae-54b05fdf4c07', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000029', '70707070-0000-0000-0000-000000000002', 95000.00, 5000.00, '2026-08-30', '2026-08-22', 'PAID', '2026-10-14T14:10:57.474870+00:00', '2026-10-14T14:10:57.474871+00:00'),
+  ('82503c49-e873-4caa-9010-0350b360eb5d', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000030', '70707070-0000-0000-0000-000000000002', 95000.00, 5000.00, '2026-08-30', '2026-08-22', 'PAID', '2026-10-14T14:10:57.481853+00:00', '2026-10-14T14:10:57.481861+00:00'),
+  ('35335d0c-de16-4453-900b-44deed2c72db', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000031', '70707070-0000-0000-0000-000000000002', 95000.00, 5000.00, '2026-08-30', '2026-08-22', 'PAID', '2026-10-14T14:10:57.485468+00:00', '2026-10-14T14:10:57.485470+00:00'),
+  ('61ca97b3-9339-4f21-81b5-2d08768a9a11', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000032', '70707070-0000-0000-0000-000000000002', 95000.00, 5000.00, '2026-08-30', '2026-08-22', 'PAID', '2026-10-14T14:10:57.487254+00:00', '2026-10-14T14:10:57.487255+00:00'),
+  ('1abc7cfb-bc58-4d33-a392-4dd4e1a346a4', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000033', '70707070-0000-0000-0000-000000000002', 95000.00, 5000.00, '2026-08-30', '2026-08-22', 'PAID', '2026-10-14T14:10:57.489041+00:00', '2026-10-14T14:10:57.489042+00:00'),
+  ('4f1fd377-a12d-45ce-bd94-106e70f82489', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000034', '70707070-0000-0000-0000-000000000002', 95000.00, 5000.00, '2026-08-30', '2026-08-22', 'PAID', '2026-10-14T14:10:57.490743+00:00', '2026-10-14T14:10:57.490744+00:00'),
+  ('b755dd1c-ccbb-4f94-a924-3ff866ba4989', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-1111-0000-0000-000000000035', '70707070-0000-0000-0000-000000000002', 95000.00, 5000.00, '2026-08-30', '2026-08-22', 'PAID', '2026-10-14T14:10:57.494568+00:00', '2026-10-14T14:10:57.494571+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: payments (25 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO payments (id, tenant_id, fee_record_id, amount, method, gateway_ref, status, verified_at, receipt_file_id, created_at, updated_at) VALUES
+  ('1972b5a9-c2b9-41c7-8410-dc44fc7536e9', '11111111-1111-1111-1111-111111111111', '0cb0077b-afcc-4503-a98b-7a85fb14798e', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE001', 'VERIFIED', '2026-10-14T14:10:57.440270+00:00', NULL, '2026-10-14T14:10:57.502945+00:00', '2026-10-14T14:10:57.502951+00:00'),
+  ('ab69d0a9-97a8-4650-9cd8-a5bf6c5468aa', '11111111-1111-1111-1111-111111111111', '42a30d4d-e20e-4d41-aee5-571d81f6ab68', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE002', 'VERIFIED', '2026-10-14T14:10:57.442147+00:00', NULL, '2026-10-14T14:10:57.502957+00:00', '2026-10-14T14:10:57.502958+00:00'),
+  ('97151e15-6c66-4f10-b4b3-fb55971d1b67', '11111111-1111-1111-1111-111111111111', '7081915c-b65a-4346-9de5-4f7083523c1d', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE003', 'VERIFIED', '2026-10-14T14:10:57.443492+00:00', NULL, '2026-10-14T14:10:57.502964+00:00', '2026-10-14T14:10:57.502965+00:00'),
+  ('f7882f28-e962-4871-9e24-e2e682fa7da5', '11111111-1111-1111-1111-111111111111', '6cae36a4-dccb-4ebc-bfed-aa6037f59e39', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE004', 'VERIFIED', '2026-10-14T14:10:57.445031+00:00', NULL, '2026-10-14T14:10:57.502968+00:00', '2026-10-14T14:10:57.502969+00:00'),
+  ('a91d864a-3f00-4fc3-a2e4-e3021f7ea6b7', '11111111-1111-1111-1111-111111111111', '9fd61ed8-1a74-4741-9f35-58253652bf88', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE005', 'VERIFIED', '2026-10-14T14:10:57.449769+00:00', NULL, '2026-10-14T14:10:57.502972+00:00', '2026-10-14T14:10:57.502973+00:00'),
+  ('e2107a91-567d-4ae2-a8da-b32b0ae4e0a1', '11111111-1111-1111-1111-111111111111', '896f0219-aa59-4d3e-a79f-26696a0bd845', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE006', 'VERIFIED', '2026-10-14T14:10:57.452585+00:00', NULL, '2026-10-14T14:10:57.502976+00:00', '2026-10-14T14:10:57.502977+00:00'),
+  ('b853292b-cf02-410c-abdd-a204d817eb85', '11111111-1111-1111-1111-111111111111', '836436b1-de46-413d-8754-c5ffe75decb0', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE007', 'VERIFIED', '2026-10-14T14:10:57.454390+00:00', NULL, '2026-10-14T14:10:57.502980+00:00', '2026-10-14T14:10:57.502981+00:00'),
+  ('4d7cc79c-fdb6-4802-a841-c682b0c7a433', '11111111-1111-1111-1111-111111111111', 'ec79643c-ef84-4b9a-8f0e-9008ab8bf65d', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE008', 'VERIFIED', '2026-10-14T14:10:57.456939+00:00', NULL, '2026-10-14T14:10:57.502984+00:00', '2026-10-14T14:10:57.502985+00:00'),
+  ('252bd644-2ac5-491c-9e9c-6422d3218792', '11111111-1111-1111-1111-111111111111', '82833a5e-7569-4604-adc3-7650e729b565', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE009', 'VERIFIED', '2026-10-14T14:10:57.458965+00:00', NULL, '2026-10-14T14:10:57.502988+00:00', '2026-10-14T14:10:57.502988+00:00'),
+  ('455c41c4-3c6d-46b0-b6c3-d69bc71877eb', '11111111-1111-1111-1111-111111111111', '5d59179a-ccab-4d32-b1cd-f22489cc1b4f', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE010', 'VERIFIED', '2026-10-14T14:10:57.460358+00:00', NULL, '2026-10-14T14:10:57.502991+00:00', '2026-10-14T14:10:57.502992+00:00'),
+  ('29ab072f-f1db-41f7-beee-7922e5b118b6', '11111111-1111-1111-1111-111111111111', 'e29bd1be-4d89-4e57-8af4-ef0bf6f10ff8', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE011', 'VERIFIED', '2026-10-14T14:10:57.462675+00:00', NULL, '2026-10-14T14:10:57.502996+00:00', '2026-10-14T14:10:57.502997+00:00'),
+  ('d3bb8896-1db3-4551-9dff-b231b1415792', '11111111-1111-1111-1111-111111111111', 'ac99b9ab-586e-4fd6-93d6-46ede64ecf44', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE012', 'VERIFIED', '2026-10-14T14:10:57.465835+00:00', NULL, '2026-10-14T14:10:57.503000+00:00', '2026-10-14T14:10:57.503001+00:00'),
+  ('23d8d83c-4faf-4328-a4c5-ab054f66da06', '11111111-1111-1111-1111-111111111111', 'a7558885-2160-42c3-9a10-684504afd113', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE013', 'VERIFIED', '2026-10-14T14:10:57.467715+00:00', NULL, '2026-10-14T14:10:57.503004+00:00', '2026-10-14T14:10:57.503005+00:00'),
+  ('b9a0e7a9-c91e-4237-84e6-fb1aec83ac2a', '11111111-1111-1111-1111-111111111111', '7f543fd9-bbba-46db-b9b3-b1b1fac8fede', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE014', 'VERIFIED', '2026-10-14T14:10:57.469099+00:00', NULL, '2026-10-14T14:10:57.503007+00:00', '2026-10-14T14:10:57.503008+00:00'),
+  ('f750b4fd-5e22-4c8b-8b6e-4a50f669f2b2', '11111111-1111-1111-1111-111111111111', 'ec79206e-c9ed-46e7-b3e0-b604f7f62442', 85000.00, 'UPI', 'PAY-APEX-UPI-2024CSE015', 'VERIFIED', '2026-10-14T14:10:57.470401+00:00', NULL, '2026-10-14T14:10:57.503013+00:00', '2026-10-14T14:10:57.503013+00:00'),
+  ('747011dd-29ef-4745-8356-55ddd31baf9e', '22222222-2222-2222-2222-222222222222', '4878527a-434e-41a1-9c71-bd361d00c333', 90000.00, 'NET_BANKING', 'PAY-METRO-NET-2024CS101', 'VERIFIED', '2026-10-14T14:10:57.472098+00:00', NULL, '2026-10-14T14:10:57.503016+00:00', '2026-10-14T14:10:57.503017+00:00'),
+  ('a7e5a517-9a1b-44e9-b516-d04d7cbff70f', '22222222-2222-2222-2222-222222222222', 'cef4287b-6c77-4736-a245-932e729d6173', 90000.00, 'NET_BANKING', 'PAY-METRO-NET-2024CS102', 'VERIFIED', '2026-10-14T14:10:57.473469+00:00', NULL, '2026-10-14T14:10:57.503020+00:00', '2026-10-14T14:10:57.503020+00:00'),
+  ('38cbc23a-5948-4322-bd4a-7de9bdcd1775', '22222222-2222-2222-2222-222222222222', '894316de-7b3e-47a8-b670-9060dca58b3a', 90000.00, 'NET_BANKING', 'PAY-METRO-NET-2024CS103', 'VERIFIED', '2026-10-14T14:10:57.474702+00:00', NULL, '2026-10-14T14:10:57.503023+00:00', '2026-10-14T14:10:57.503024+00:00'),
+  ('39a2a022-ebbe-4905-9480-e8ef4a87fc54', '22222222-2222-2222-2222-222222222222', 'ba2fbcdd-0a59-4fce-a4ae-54b05fdf4c07', 90000.00, 'NET_BANKING', 'PAY-METRO-NET-2024CS104', 'VERIFIED', '2026-10-14T14:10:57.476315+00:00', NULL, '2026-10-14T14:10:57.503027+00:00', '2026-10-14T14:10:57.503028+00:00'),
+  ('c401e632-ad03-4cff-ab59-507724690b71', '22222222-2222-2222-2222-222222222222', '82503c49-e873-4caa-9010-0350b360eb5d', 90000.00, 'NET_BANKING', 'PAY-METRO-NET-2024CS105', 'VERIFIED', '2026-10-14T14:10:57.485256+00:00', NULL, '2026-10-14T14:10:57.503031+00:00', '2026-10-14T14:10:57.503031+00:00'),
+  ('1e32433d-4777-4e27-875a-0c922bc7d8c4', '22222222-2222-2222-2222-222222222222', '35335d0c-de16-4453-900b-44deed2c72db', 90000.00, 'NET_BANKING', 'PAY-METRO-NET-2024CS106', 'VERIFIED', '2026-10-14T14:10:57.487030+00:00', NULL, '2026-10-14T14:10:57.503034+00:00', '2026-10-14T14:10:57.503035+00:00'),
+  ('94d33736-0240-4376-b40e-bb7a5fedc7aa', '22222222-2222-2222-2222-222222222222', '61ca97b3-9339-4f21-81b5-2d08768a9a11', 90000.00, 'NET_BANKING', 'PAY-METRO-NET-2024CS107', 'VERIFIED', '2026-10-14T14:10:57.488858+00:00', NULL, '2026-10-14T14:10:57.503038+00:00', '2026-10-14T14:10:57.503039+00:00'),
+  ('c612a7b4-765b-4782-8c48-565fdbfbe75d', '22222222-2222-2222-2222-222222222222', '1abc7cfb-bc58-4d33-a392-4dd4e1a346a4', 90000.00, 'NET_BANKING', 'PAY-METRO-NET-2024CS108', 'VERIFIED', '2026-10-14T14:10:57.490486+00:00', NULL, '2026-10-14T14:10:57.503041+00:00', '2026-10-14T14:10:57.503042+00:00'),
+  ('399b4242-2cf0-48f1-bf56-dafdad4752b9', '22222222-2222-2222-2222-222222222222', '4f1fd377-a12d-45ce-bd94-106e70f82489', 90000.00, 'NET_BANKING', 'PAY-METRO-NET-2024CS109', 'VERIFIED', '2026-10-14T14:10:57.494070+00:00', NULL, '2026-10-14T14:10:57.503045+00:00', '2026-10-14T14:10:57.503046+00:00'),
+  ('ed6602d2-c95f-47b7-80d0-7fdd73fbdc04', '22222222-2222-2222-2222-222222222222', 'b755dd1c-ccbb-4f94-a924-3ff866ba4989', 90000.00, 'NET_BANKING', 'PAY-METRO-NET-2024CS110', 'VERIFIED', '2026-10-14T14:10:57.499849+00:00', NULL, '2026-10-14T14:10:57.503048+00:00', '2026-10-14T14:10:57.503049+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: exams (2 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO exams (id, tenant_id, term_id, offering_id, exam_type, exam_date, start_time, end_time, room_id, max_marks, created_at, updated_at) VALUES
+  ('80808080-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', '10101010-0000-0000-0000-000000000001', '50505050-0000-0000-0000-000000000001', 'MID_TERM', '2026-10-12', '10:00:00', '12:00:00', '20202020-0000-0000-0000-000000000001', 50.00, '2026-10-14T14:10:57.515459+00:00', '2026-10-14T14:10:57.515468+00:00'),
+  ('80808080-0000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', '10101010-0000-0000-0000-000000000003', '50505050-0000-0000-0000-000000000004', 'MID_TERM', '2026-10-14', '14:00:00', '16:00:00', '20202020-0000-0000-0000-000000000004', 50.00, '2026-10-14T14:10:57.515475+00:00', '2026-10-14T14:10:57.515478+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: exam_registrations (25 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO exam_registrations (id, tenant_id, exam_id, student_id, is_eligible, status, registered_at, created_at, updated_at) VALUES
+  ('9f977bba-84d8-4ef5-9148-b1c18701a53c', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000001', TRUE, 'APPROVED', '2026-10-14T14:10:57.520894+00:00', '2026-10-14T14:10:57.520897+00:00', '2026-10-14T14:10:57.520897+00:00'),
+  ('92e51045-cc55-4c4e-96f6-91d56aab40ae', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000002', TRUE, 'APPROVED', '2026-10-14T14:10:57.520901+00:00', '2026-10-14T14:10:57.520901+00:00', '2026-10-14T14:10:57.520902+00:00'),
+  ('ee4b00fd-a243-4451-8ae0-806fd95a7f56', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000003', TRUE, 'APPROVED', '2026-10-14T14:10:57.520903+00:00', '2026-10-14T14:10:57.520904+00:00', '2026-10-14T14:10:57.520904+00:00'),
+  ('9e85b342-2e98-4adf-a24c-3e575bc208a5', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000004', TRUE, 'APPROVED', '2026-10-14T14:10:57.520906+00:00', '2026-10-14T14:10:57.520906+00:00', '2026-10-14T14:10:57.520907+00:00'),
+  ('08a15c18-d766-46d2-aa41-0c0c6a904d7d', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000005', TRUE, 'APPROVED', '2026-10-14T14:10:57.520908+00:00', '2026-10-14T14:10:57.520909+00:00', '2026-10-14T14:10:57.520909+00:00'),
+  ('fd6604fe-fb2a-4bff-8ec8-386bdc4abfca', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000006', TRUE, 'APPROVED', '2026-10-14T14:10:57.520911+00:00', '2026-10-14T14:10:57.520911+00:00', '2026-10-14T14:10:57.520911+00:00'),
+  ('760839a3-b9ce-4eee-bcde-c4fde462812b', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000007', TRUE, 'APPROVED', '2026-10-14T14:10:57.520913+00:00', '2026-10-14T14:10:57.520913+00:00', '2026-10-14T14:10:57.520914+00:00'),
+  ('9e2ce110-f267-4c95-8c82-dcac7b970f9c', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000008', TRUE, 'APPROVED', '2026-10-14T14:10:57.520915+00:00', '2026-10-14T14:10:57.520915+00:00', '2026-10-14T14:10:57.520916+00:00'),
+  ('9aa35204-aac8-4e90-8a3c-6167a3270299', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000009', TRUE, 'APPROVED', '2026-10-14T14:10:57.520917+00:00', '2026-10-14T14:10:57.520917+00:00', '2026-10-14T14:10:57.520918+00:00'),
+  ('8998a9ed-7f05-441a-a49b-ae697cbe3980', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000010', TRUE, 'APPROVED', '2026-10-14T14:10:57.520919+00:00', '2026-10-14T14:10:57.520920+00:00', '2026-10-14T14:10:57.520920+00:00'),
+  ('f33339bc-1eba-4c51-9389-c4e3724da98c', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000011', TRUE, 'APPROVED', '2026-10-14T14:10:57.520921+00:00', '2026-10-14T14:10:57.520922+00:00', '2026-10-14T14:10:57.520922+00:00'),
+  ('8ccfbd18-b80e-4333-badc-58c696f8277a', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000012', TRUE, 'APPROVED', '2026-10-14T14:10:57.520923+00:00', '2026-10-14T14:10:57.520924+00:00', '2026-10-14T14:10:57.520924+00:00'),
+  ('05cbe569-57f4-41d4-b11b-68ea0cb76c33', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000013', TRUE, 'APPROVED', '2026-10-14T14:10:57.520925+00:00', '2026-10-14T14:10:57.520926+00:00', '2026-10-14T14:10:57.520926+00:00'),
+  ('049ce854-1f0f-4ad7-921b-0ca4f9ed48a6', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000014', TRUE, 'APPROVED', '2026-10-14T14:10:57.520927+00:00', '2026-10-14T14:10:57.520927+00:00', '2026-10-14T14:10:57.520928+00:00'),
+  ('08731672-db50-4c46-b14c-a12930fa796b', '11111111-1111-1111-1111-111111111111', '80808080-0000-0000-0000-000000000001', 'eeeeeeee-1111-0000-0000-000000000015', TRUE, 'APPROVED', '2026-10-14T14:10:57.520929+00:00', '2026-10-14T14:10:57.520929+00:00', '2026-10-14T14:10:57.520930+00:00'),
+  ('9a1f434d-0aee-479a-99c3-24024ad3646b', '22222222-2222-2222-2222-222222222222', '80808080-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000026', TRUE, 'APPROVED', '2026-10-14T14:10:57.520931+00:00', '2026-10-14T14:10:57.520931+00:00', '2026-10-14T14:10:57.520932+00:00'),
+  ('a553f260-3b1b-4bc0-9e9a-4c13c268ad17', '22222222-2222-2222-2222-222222222222', '80808080-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000027', TRUE, 'APPROVED', '2026-10-14T14:10:57.520933+00:00', '2026-10-14T14:10:57.520933+00:00', '2026-10-14T14:10:57.520934+00:00'),
+  ('c677c734-3462-4773-a039-1ed19f8924a7', '22222222-2222-2222-2222-222222222222', '80808080-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000028', TRUE, 'APPROVED', '2026-10-14T14:10:57.520935+00:00', '2026-10-14T14:10:57.520935+00:00', '2026-10-14T14:10:57.520936+00:00'),
+  ('34da1f80-7a64-4d47-b416-73935ad7e264', '22222222-2222-2222-2222-222222222222', '80808080-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000029', TRUE, 'APPROVED', '2026-10-14T14:10:57.520937+00:00', '2026-10-14T14:10:57.520937+00:00', '2026-10-14T14:10:57.520938+00:00'),
+  ('b39dea31-5880-4f4a-aa63-314c9ffff80d', '22222222-2222-2222-2222-222222222222', '80808080-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000030', TRUE, 'APPROVED', '2026-10-14T14:10:57.520939+00:00', '2026-10-14T14:10:57.520939+00:00', '2026-10-14T14:10:57.520940+00:00'),
+  ('87590198-0190-4e4b-9f8c-bf029e3c5249', '22222222-2222-2222-2222-222222222222', '80808080-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000031', TRUE, 'APPROVED', '2026-10-14T14:10:57.520941+00:00', '2026-10-14T14:10:57.520941+00:00', '2026-10-14T14:10:57.520941+00:00'),
+  ('d153e31d-7111-4c86-978d-e792274add23', '22222222-2222-2222-2222-222222222222', '80808080-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000032', TRUE, 'APPROVED', '2026-10-14T14:10:57.520943+00:00', '2026-10-14T14:10:57.520943+00:00', '2026-10-14T14:10:57.520944+00:00'),
+  ('8f4f991b-46ab-46ca-8f08-68da0c35370e', '22222222-2222-2222-2222-222222222222', '80808080-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000033', TRUE, 'APPROVED', '2026-10-14T14:10:57.520945+00:00', '2026-10-14T14:10:57.520945+00:00', '2026-10-14T14:10:57.520946+00:00'),
+  ('2332fed0-5966-4c6a-818b-3de74eb4cff3', '22222222-2222-2222-2222-222222222222', '80808080-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000034', TRUE, 'APPROVED', '2026-10-14T14:10:57.520947+00:00', '2026-10-14T14:10:57.520947+00:00', '2026-10-14T14:10:57.520948+00:00'),
+  ('cc4042a6-382a-4cad-a34f-9b80b2b27de9', '22222222-2222-2222-2222-222222222222', '80808080-0000-0000-0000-000000000002', 'eeeeeeee-1111-0000-0000-000000000035', TRUE, 'APPROVED', '2026-10-14T14:10:57.520949+00:00', '2026-10-14T14:10:57.520949+00:00', '2026-10-14T14:10:57.520950+00:00')
+ON CONFLICT DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- Data for Table: notifications (2 records)
+-- -----------------------------------------------------------------------------
+INSERT INTO notifications (id, tenant_id, sent_by, offering_id, event_type, target_role, title, message, sent_at, created_at, updated_at) VALUES
+  ('7c9ce73b-2308-4644-bfb7-56cebfe60f95', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000001', NULL, 'CAMPUS_ANNOUNCEMENT', 'ALL', 'Welcome to Academic Year 2026-27', 'All students and faculty are requested to verify their timetable and laboratory assignments.', '2026-10-14T14:10:57.528300+00:00', '2026-10-14T14:10:57.528303+00:00', '2026-10-14T14:10:57.528304+00:00'),
+  ('54d725a9-b413-4717-959a-708de5b5ef6c', '22222222-2222-2222-2222-222222222222', 'aaaaaaaa-0000-0000-0000-000000000002', NULL, 'EXAM_SCHEDULE', 'STUDENT', 'Mid-Term Examination Dates Published', 'The Mid-Term exam window opens on October 10. Check the portal for hall ticket downloads.', '2026-10-14T14:10:57.528309+00:00', '2026-10-14T14:10:57.528310+00:00', '2026-10-14T14:10:57.528311+00:00')
+ON CONFLICT DO NOTHING;
+
+SET session_replication_role = 'origin';
+COMMIT;

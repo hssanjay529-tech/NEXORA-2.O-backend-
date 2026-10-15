@@ -9,7 +9,8 @@ BEGIN;
 -- (Bcrypt hash: $2a$10$wN9P3XJv8mQv8W3hP5nqeOH5/w.wXhWjJ.88G4yGg5d9u1L7vB2Gy)
 DO $$
 DECLARE
-    v_pwd_hash TEXT := '$2a$10$wN9P3XJv8mQv8W3hP5nqeOH5/w.wXhWjJ.88G4yGg5d9u1L7vB2Gy';
+    v_pwd_hash TEXT := '$2b$12$UVG4Rp46CEU1QNn3tTC52.72avfuZoRtg9RG44sWkPQO7Q5/1aH.O';
+    v_sanju_pwd_hash TEXT := '$2b$12$o45LmGhmxajUmZsulz8yW.S27DPhagMujyi.9MIPMAClzo2Tjjjbm';
     
     -- Tenants
     t_apex_id UUID := '11111111-1111-1111-1111-111111111111';
@@ -131,20 +132,20 @@ BEGIN
     (u_hod_cse_id, t_apex_id, 'FACULTY', 'hod.cse@apex.edu', 'Dr. Aris', 'Thorne', v_pwd_hash, 'ACTIVE'),
     (u_fac_priya_id, t_apex_id, 'FACULTY', 'prof.priya@apex.edu', 'Dr. Priya', 'Nair', v_pwd_hash, 'ACTIVE'),
     (u_fac_vikram_id, t_apex_id, 'FACULTY', 'prof.vikram@apex.edu', 'Prof. Vikram', 'Malhotra', v_pwd_hash, 'ACTIVE'),
-    (u_stu_aarav_id, t_apex_id, 'STUDENT', 'student.aarav@apex.edu', 'Aarav', 'Patel', v_pwd_hash, 'ACTIVE'),
-    (u_stu_ananya_id, t_apex_id, 'STUDENT', 'student.ananya@apex.edu', 'Ananya', 'Iyer', v_pwd_hash, 'ACTIVE'),
-    (u_stu_rohan_id, t_apex_id, 'STUDENT', 'student.rohan@apex.edu', 'Rohan', 'Gupta', v_pwd_hash, 'ACTIVE'),
-    (u_stu_sneha_id, t_apex_id, 'STUDENT', 'student.sneha@apex.edu', 'Sneha', 'Verma', v_pwd_hash, 'ACTIVE')
+    (u_stu_aarav_id, t_apex_id, 'STUDENT', 'sanjudeepu.153@gmail.com', 'Sanjay', 'H S', v_sanju_pwd_hash, 'ACTIVE'),
+    (u_stu_ananya_id, t_apex_id, 'STUDENT', 'student.nirmala.g@apex.edu', 'Nirmala', 'G', v_pwd_hash, 'ACTIVE'),
+    (u_stu_rohan_id, t_apex_id, 'STUDENT', 'student.nisarga.bg@apex.edu', 'Nisarga', 'B G', v_pwd_hash, 'ACTIVE'),
+    (u_stu_sneha_id, t_apex_id, 'STUDENT', 'student.nishanth.ck@apex.edu', 'Nishanth', 'C K', v_pwd_hash, 'ACTIVE')
     ON CONFLICT (id) DO NOTHING;
 
     -- 3. FILES REPOSITORY
     INSERT INTO files (id, tenant_id, uploaded_by, storage_key, filename, mime_type, size_bytes, sha256, kind) VALUES
     (fil_syllabus_cs301, t_apex_id, u_hod_cse_id, t_apex_id || '/syllabi/CS301_DBMS_2026.pdf', 'CS301_DBMS_Syllabus.pdf', 'application/pdf', 1048576, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', 'SYLLABUS'),
     (fil_rubric_cs301, t_apex_id, u_hod_cse_id, t_apex_id || '/rubrics/CS301_Assignment1_Rubric.pdf', 'CS301_Assignment1_Rubric.pdf', 'application/pdf', 524288, 'a8b9c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c', 'RUBRIC'),
-    (fil_sub_aarav, t_apex_id, u_stu_aarav_id, t_apex_id || '/submissions/2024CSE001_CS301_Assign1.zip', 'AaravPatel_DBMS_Assignment1.zip', 'application/zip', 4194304, 'bcde1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab', 'SUBMISSION'),
-    (fil_receipt_aarav, t_apex_id, u_admin_id, t_apex_id || '/receipts/REC-2026-08-00129.pdf', 'FeeReceipt_Fall2026_AaravPatel.pdf', 'application/pdf', 314572, 'cdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab', 'RECEIPT'),
-    (fil_ht_aarav, t_apex_id, u_admin_id, t_apex_id || '/halltickets/HT-2026-CSE001.pdf', 'HallTicket_MidTerm_AaravPatel.pdf', 'application/pdf', 419430, 'defa1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab', 'HALL_TICKET'),
-    (fil_doc_bona, t_apex_id, u_admin_id, t_apex_id || '/documents/BONA_2024CSE001.pdf', 'Bonafide_Certificate_AaravPatel.pdf', 'application/pdf', 262144, 'efab1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab', 'DOCUMENT'),
+    (fil_sub_aarav, t_apex_id, u_stu_aarav_id, t_apex_id || '/submissions/2024CSE001_CS301_Assign1.zip', 'SanjayHS_DBMS_Assignment1.zip', 'application/zip', 4194304, 'bcde1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab', 'SUBMISSION'),
+    (fil_receipt_aarav, t_apex_id, u_admin_id, t_apex_id || '/receipts/REC-2026-08-00129.pdf', 'FeeReceipt_Fall2026_SanjayHS.pdf', 'application/pdf', 314572, 'cdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab', 'RECEIPT'),
+    (fil_ht_aarav, t_apex_id, u_admin_id, t_apex_id || '/halltickets/HT-2026-CSE001.pdf', 'HallTicket_MidTerm_SanjayHS.pdf', 'application/pdf', 419430, 'defa1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab', 'HALL_TICKET'),
+    (fil_doc_bona, t_apex_id, u_admin_id, t_apex_id || '/documents/BONA_2024CSE001.pdf', 'Bonafide_Certificate_SanjayHS.pdf', 'application/pdf', 262144, 'efab1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab', 'DOCUMENT'),
     (fil_mat_dbms, t_apex_id, u_hod_cse_id, t_apex_id || '/materials/CS301_Unit1_Relational_Algebra.pdf', 'Unit1_Relational_Algebra_Notes.pdf', 'application/pdf', 2097152, 'fabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab', 'MATERIAL'),
     (fil_nba_doc, t_apex_id, u_admin_id, t_apex_id || '/compliance/NBA_Tier1_SAR_CSE_2026.pdf', 'NBA_Accreditation_SAR_CSE.pdf', 'application/pdf', 8388608, 'abcd1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab', 'COMPLIANCE'),
     (fil_report_att, t_apex_id, u_admin_id, t_apex_id || '/reports/Attendance_Analytics_Sep2026.pdf', 'Attendance_Intelligence_Report_Sep2026.pdf', 'application/pdf', 1572864, '01231234567890abcdef1234567890abcdef1234567890abcdef1234567890ab', 'REPORT')
@@ -413,7 +414,7 @@ BEGIN
     ON CONFLICT (tenant_id, conversation_id, user_id) DO NOTHING;
 
     INSERT INTO messages (tenant_id, conversation_id, sender_id, body) VALUES
-    (t_apex_id, conv_direct_id, u_hod_cse_id, 'Aarav, excellent work on your database assignment. Would you be interested in co-authoring a paper on LSM-Tree compaction optimization?'),
+    (t_apex_id, conv_direct_id, u_hod_cse_id, 'Sanjay, excellent work on your database assignment. Would you be interested in co-authoring a paper on LSM-Tree compaction optimization?'),
     (t_apex_id, conv_direct_id, u_stu_aarav_id, 'Thank you Dr. Thorne! Yes, absolutely. I would love to contribute to the storage engine research.')
     ON CONFLICT DO NOTHING;
 

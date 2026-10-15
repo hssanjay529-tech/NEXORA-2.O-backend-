@@ -14,17 +14,31 @@ def create_workflow_instance(
     status: str = "SUBMITTED",
     current_step: str = "HOD_APPROVAL"
 ) -> WorkflowInstance:
-    """Initializes a workflow instance and its initial transition record."""
-    instance = WorkflowInstance(
-        tenant_id=tenant_id,
-        entity_type=entity_type,
-        entity_id=entity_id,
-        submitted_by=submitted_by,
-        status=status,
-        current_step=current_step,
-        submitted_at=datetime.now(timezone.utc)
-    )
-    db.add(instance)
+    """Initializes or updates a workflow instance and its transition record."""
+    existing = db.query(WorkflowInstance).filter(
+        WorkflowInstance.tenant_id == tenant_id,
+        WorkflowInstance.entity_type == entity_type,
+        WorkflowInstance.entity_id == entity_id
+    ).first()
+
+    if existing:
+        existing.status = status
+        existing.current_step = current_step
+        existing.submitted_by = submitted_by
+        existing.submitted_at = datetime.now(timezone.utc)
+        existing.completed_at = None
+        instance = existing
+    else:
+        instance = WorkflowInstance(
+            tenant_id=tenant_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            submitted_by=submitted_by,
+            status=status,
+            current_step=current_step,
+            submitted_at=datetime.now(timezone.utc)
+        )
+        db.add(instance)
     db.flush()
 
     transition = WorkflowTransition(

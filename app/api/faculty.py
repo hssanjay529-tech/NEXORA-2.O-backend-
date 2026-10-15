@@ -189,13 +189,24 @@ def batch_record_attendance(
 ):
     """FAC-02 Bulk record class attendance and trigger flags if attendance drops below 75%."""
     fac = _get_faculty_profile(current_user, db)
+    target_offering_id = payload.offering_id
+    if not target_offering_id:
+        active_off = db.query(CourseOffering).filter(
+            CourseOffering.tenant_id == current_user.tenant_id,
+            CourseOffering.faculty_id == fac.id
+        ).first()
+        if active_off:
+            target_offering_id = active_off.id
+        else:
+            raise NotFoundException("Active course offering not found for faculty")
+
     recorded_count = 0
     flagged_students = []
 
     for item in payload.records:
         att = db.query(Attendance).filter(
             Attendance.tenant_id == current_user.tenant_id,
-            Attendance.offering_id == payload.offering_id,
+            Attendance.offering_id == target_offering_id,
             Attendance.student_id == item.student_id,
             Attendance.att_date == payload.att_date
         ).first()
@@ -207,7 +218,7 @@ def batch_record_attendance(
         else:
             att = Attendance(
                 tenant_id=current_user.tenant_id,
-                offering_id=payload.offering_id,
+                offering_id=target_offering_id,
                 student_id=item.student_id,
                 att_date=payload.att_date,
                 status=item.status,
@@ -220,12 +231,12 @@ def batch_record_attendance(
         # Check total attendance % for this student in this course
         total = db.query(Attendance).filter(
             Attendance.tenant_id == current_user.tenant_id,
-            Attendance.offering_id == payload.offering_id,
+            Attendance.offering_id == target_offering_id,
             Attendance.student_id == item.student_id
         ).count()
         present = db.query(Attendance).filter(
             Attendance.tenant_id == current_user.tenant_id,
-            Attendance.offering_id == payload.offering_id,
+            Attendance.offering_id == target_offering_id,
             Attendance.student_id == item.student_id,
             Attendance.status.in_(["PRESENT", "LATE"])
         ).count()
@@ -302,7 +313,8 @@ def get_faculty_attendance_roster(
             "name": f"{en.student.user.first_name} {en.student.user.last_name}",
             "roll_number": en.student.roll_no,
             "status": "PRESENT",
-            "attendance_pct": pct
+            "attendance_pct": pct,
+            "offering_id": str(offering.id)
         })
     return out
 
@@ -598,7 +610,9 @@ def get_faculty_grades_roster(
             "midterm_marks": round(internal * 1.3, 1),
             "final_exam_marks": final_m,
             "total_marks": tot,
-            "letter_grade": letter
+            "letter_grade": letter,
+            "offering_id": str(offering.id),
+            "course_code": offering.course.course_code if offering.course else "CS302"
         })
     return out
 
@@ -652,17 +666,29 @@ def submit_grades_for_approval(
     db: Session = Depends(get_db)
 ):
     """FAC-04 Submit course grade book for Admin approval workflow."""
+    fac = _get_faculty_profile(current_user, db)
+    target_offering_id = payload.offering_id
+    if not target_offering_id:
+        active_off = db.query(CourseOffering).filter(
+            CourseOffering.tenant_id == current_user.tenant_id,
+            CourseOffering.faculty_id == fac.id
+        ).first()
+        if active_off:
+            target_offering_id = active_off.id
+        else:
+            raise NotFoundException("Active course offering not found for faculty")
+
     # Update status to SUBMITTED
     db.query(GradeRecord).filter(
         GradeRecord.tenant_id == current_user.tenant_id,
-        GradeRecord.offering_id == payload.offering_id
+        GradeRecord.offering_id == target_offering_id
     ).update({"status": "SUBMITTED"})
 
     # Create workflow instance
     wf = create_workflow_instance(
         db, current_user.tenant_id,
         entity_type="GRADE_BATCH",
-        entity_id=payload.offering_id,
+        entity_id=target_offering_id,
         submitted_by=current_user.id,
         status="SUBMITTED",
         current_step="ADMIN_REVIEW"
