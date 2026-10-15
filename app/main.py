@@ -196,7 +196,7 @@ def create_application() -> FastAPI:
                 "error": {
                     "code": "DATABASE_ERROR",
                     "message": "An unexpected database operation error occurred",
-                    "details": None
+                    "details": str(exc)
                 }
             }
         )
@@ -226,6 +226,32 @@ def create_application() -> FastAPI:
             "environment": settings.ENVIRONMENT,
             "version": "1.0.0"
         }
+
+    @app.get("/health/db", tags=["System Health"])
+    def db_health_check():
+        from sqlalchemy import text
+        from app.database import engine
+        try:
+            with engine.connect() as conn:
+                table_cnt = conn.execute(text("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")).scalar()
+                tenants_cnt = 0
+                try:
+                    tenants_cnt = conn.execute(text("SELECT count(*) FROM tenants")).scalar()
+                except Exception:
+                    pass
+                return {
+                    "database_connected": True,
+                    "public_tables_count": table_cnt,
+                    "tenants_count": tenants_cnt,
+                    "db_host": engine.url.host,
+                    "db_name": engine.url.database,
+                }
+        except Exception as e:
+            return {
+                "database_connected": False,
+                "error": str(e),
+                "db_host": getattr(engine.url, 'host', 'unknown') if hasattr(engine, 'url') else 'unknown',
+            }
 
     @app.get("/", tags=["Root"])
     def root():
