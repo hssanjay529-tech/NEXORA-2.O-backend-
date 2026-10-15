@@ -1,8 +1,11 @@
 import uuid
 import hashlib
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
+
+logger = logging.getLogger("nexora")
 from sqlalchemy.orm import Session
 from app.database import get_db, set_tenant_context
 from app.config import settings
