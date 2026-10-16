@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS platform_operators (
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    role TEXT NOT NULL CHECK (role IN ('ADMIN', 'FACULTY', 'STUDENT')),
+    role TEXT NOT NULL CHECK (role IN ('ADMIN', 'FACULTY', 'STUDENT', 'DEAN')),
     email CITEXT NOT NULL,
     first_name TEXT NOT NULL,
     last_name TEXT NOT NULL,
