@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "nexora"
-    DATABASE_URL: str = "postgresql+psycopg2://nexora_admin:nexora_password@localhost:5432/nexora"
+    DATABASE_URL: str = "postgresql+psycopg2://postgres.eubvhpfnmlcwyhdbayzm:whySJw2Bm4eDZuqL@aws-0-ap-southeast-2.pooler.supabase.com:6543/postgres?sslmode=require"
 
     # Security & JWT
     SECRET_KEY: str = "nexora-insecure-secret-key-change-in-production-2026-secure-jwt"
