@@ -538,11 +538,19 @@ STUDENT_ROSTER = [
 ]
 
 
-def generate_database_url() -> str:
-    """Build PostgreSQL connection URL from environment or defaults."""
-    env_url = os.getenv("DATABASE_URL")
-    if env_url:
-        return env_url
+def generate_database_url(raw_url: str = None) -> str:
+    """Build PostgreSQL connection URL from environment or defaults with driver normalization."""
+    url = raw_url or os.getenv("DATABASE_URL")
+    if url:
+        url = url.strip()
+        if url.startswith("postgres://"):
+            url = "postgresql+psycopg2://" + url[len("postgres://"):]
+        elif url.startswith("postgresql://") and not url.startswith("postgresql+psycopg2://"):
+            url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+        if ("pooler.supabase.com" in url or "supabase.co" in url) and "sslmode=" not in url:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}sslmode=require"
+        return url
     user = os.getenv("POSTGRES_USER", "nexora_admin")
     password = os.getenv("POSTGRES_PASSWORD", "nexora_password")
     host = os.getenv("POSTGRES_HOST", "localhost")
@@ -575,6 +583,9 @@ def seed_database(db_url: str, reset: bool = True):
     """Primary seeding routine connecting to PostgreSQL and populating schema."""
     logger.info(f"Connecting to database at {db_url}...")
     engine = create_engine(db_url, echo=False)
+    logger.info("Ensuring all relational tables exist...")
+    Base.metadata.create_all(bind=engine)
+    logger.info("Relational tables verified.")
     Session = sessionmaker(bind=engine)
     session = Session()
 
@@ -1397,5 +1408,5 @@ if __name__ == '__main__':
     parser.add_argument("--no-reset", action="store_true", help="Do not truncate existing data before seeding")
     args = parser.parse_args()
 
-    url = args.db_url or generate_database_url()
+    url = generate_database_url(args.db_url)
     seed_database(db_url=url, reset=not args.no_reset)

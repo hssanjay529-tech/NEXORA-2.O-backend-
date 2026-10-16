@@ -34,6 +34,23 @@ class Settings(BaseSettings):
         "http://localhost:8000",
     ]
 
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def assemble_database_url(cls, v: str) -> str:
+        if not v or not isinstance(v, str):
+            return v
+        cleaned = v.strip()
+        # Normalize driver for SQLAlchemy + psycopg2
+        if cleaned.startswith("postgres://"):
+            cleaned = "postgresql+psycopg2://" + cleaned[len("postgres://"):]
+        elif cleaned.startswith("postgresql://") and not cleaned.startswith("postgresql+psycopg2://"):
+            cleaned = "postgresql+psycopg2://" + cleaned[len("postgresql://"):]
+        # Append sslmode=require for remote cloud databases like Supabase if absent
+        if ("pooler.supabase.com" in cleaned or "supabase.co" in cleaned) and "sslmode=" not in cleaned:
+            sep = "&" if "?" in cleaned else "?"
+            cleaned = f"{cleaned}{sep}sslmode=require"
+        return cleaned
+
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
